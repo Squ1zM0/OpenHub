@@ -3,14 +3,16 @@ import {
   DeepSeekAdapter,
   ScriptedAdapter,
   defaultDemoScript,
+  decryptCredentials,
   readDeepSeekEnv,
-  parseCookies,
+  DEFAULT_USER_ID,
   runTask,
   type Adapter,
   type JobDispatcher,
   type Message,
 } from "@openhub/agent";
 import { sendJob } from "@/src/lib/tasks.js";
+import { getCredentialStore } from "@/src/lib/credential-store.js";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -18,11 +20,8 @@ export const maxDuration = 300;
 const Body = z.object({
   session_id: z.string().min(1),
   task: z.string().min(1),
-  /** "scripted" (default) or "deepseek". */
   adapter: z.enum(["scripted", "deepseek"]).default("scripted"),
-  /** Scripted-only: sequence of responses. */
   script: z.array(z.string()).optional(),
-  /** Scripted-only: file path for the default demo script. */
   file: z.string().optional(),
   max_turns: z.number().int().positive().max(30).default(12),
   job_timeout_ms: z.number().int().positive().max(55_000).default(30_000),
@@ -53,7 +52,7 @@ export async function POST(req: Request): Promise<Response> {
 
   let adapter: Adapter;
   try {
-    adapter = buildAdapter(adapterKind, { script, file });
+    adapter = await buildAdapter(adapterKind, { script, file });
   } catch (e) {
     return Response.json(
       { error: `adapter init: ${(e as Error).message}` },
@@ -71,12 +70,7 @@ export async function POST(req: Request): Promise<Response> {
     return { status: "error", error: res.error, durationMs };
   };
 
-  const result = await runTask({
-    task,
-    adapter,
-    dispatch,
-    maxTurns: max_turns,
-  });
+  const result = await runTask({ task, adapter, dispatch, maxTurns: max_turns });
 
   return Response.json({
     adapter: adapterKind,
@@ -89,10 +83,10 @@ export async function POST(req: Request): Promise<Response> {
   });
 }
 
-function buildAdapter(
+async function buildAdapter(
   kind: "scripted" | "deepseek",
   opts: { script?: string[]; file?: string },
-): Adapter {
+): Promise<Adapter> {
   if (kind === "scripted") {
     return new ScriptedAdapter(
       opts.script && opts.script.length > 0
@@ -102,11 +96,20 @@ function buildAdapter(
   }
 
   const env = readDeepSeekEnv();
-  const cookies = parseCookies(env.DEEPSEEK_COOKIES);
+  const stored = await getCredentialStore().get(DEFAULT_USER_ID);
+  if (!stored) {
+    throw new Error(
+      "DeepSeek is not connected. Go to /connect/deepseek first.",
+    );
+  }
+
+  const payload = decryptCredentials(stored, env.DEEPSEEK_CREDENTIAL_KEY);
+
   return new DeepSeekAdapter({
     browserlessToken: env.BROWSERLESS_TOKEN,
     browserlessUrl: env.BROWSERLESS_URL,
-    cookies,
+    cookies: payload.cookies,
+    selectors: payload.selectors,
     debug: true,
   });
 }
