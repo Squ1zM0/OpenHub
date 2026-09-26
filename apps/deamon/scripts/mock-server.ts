@@ -2,14 +2,8 @@
 /**
  * Minimal mock of the cloud side of the poll protocol, for local testing.
  *
- * Delivers a fixed sequence of jobs that exercises the full tool registry:
- *   1. write_file   — create hello.txt
- *   2. read_file    — confirm it exists
- *   3. apply_patch  — change "hello" to "goodbye"
- *   4. read_file    — confirm the patch landed
- *   5. shutdown     — ask the daemon to exit cleanly
- *
- * Prints every result as it comes back, then exits a few seconds after the
+ * Delivers a fixed sequence that exercises every tool in the registry,
+ * prints each result as it comes back, and exits a few seconds after the
  * shutdown job completes.
  */
 import { createServer } from "node:http";
@@ -25,7 +19,7 @@ interface PlannedJob {
   label: string;
 }
 
-function plan(sessionId: string): PlannedJob[] {
+function plan(): PlannedJob[] {
   return [
     {
       label: "create hello.txt",
@@ -43,16 +37,61 @@ function plan(sessionId: string): PlannedJob[] {
       label: "patch hello → goodbye",
       kind: "tool_call",
       tool: "apply_patch",
-      args: {
-        path: "hello.txt",
-        patch: "@@ -1 +1 @@\n-hello\n+goodbye\n",
-      },
+      args: { path: "hello.txt", patch: "@@ -1 +1 @@\n-hello\n+goodbye\n" },
     },
     {
       label: "confirm the patch",
       kind: "tool_call",
       tool: "read_file",
       args: { path: "hello.txt" },
+    },
+    {
+      label: "show working-tree diff",
+      kind: "tool_call",
+      tool: "git_diff",
+      args: {},
+    },
+    {
+      label: "commit the change",
+      kind: "tool_call",
+      tool: "git_commit",
+      args: { message: "change greeting" },
+    },
+    {
+      label: "confirm clean tree",
+      kind: "tool_call",
+      tool: "git_status",
+      args: {},
+    },
+    {
+      label: "overwrite hello.txt",
+      kind: "tool_call",
+      tool: "write_file",
+      args: { path: "hello.txt", content: "nevermind\n" },
+    },
+    {
+      label: "read the overwrite",
+      kind: "tool_call",
+      tool: "read_file",
+      args: { path: "hello.txt" },
+    },
+    {
+      label: "restore hello.txt to HEAD",
+      kind: "tool_call",
+      tool: "git_restore",
+      args: { path: "hello.txt" },
+    },
+    {
+      label: "confirm restore worked",
+      kind: "tool_call",
+      tool: "read_file",
+      args: { path: "hello.txt" },
+    },
+    {
+      label: "run: git log --oneline",
+      kind: "tool_call",
+      tool: "run",
+      args: { command: "git log --oneline" },
     },
     {
       label: "shutdown",
@@ -95,14 +134,15 @@ const server = createServer(async (req, res) => {
 
     let queue = queues.get(body.session_id);
     if (!queue) {
-      queue = plan(body.session_id);
+      queue = plan();
       queues.set(body.session_id, queue);
-      console.log(`session ${body.session_id} opened — ${queue.length} jobs queued\n`);
+      console.log(
+        `session ${body.session_id} opened — ${queue.length} jobs queued\n`,
+      );
     }
 
     const next = queue.shift();
     if (!next) {
-      // Mimic a long-poll timeout.
       await new Promise((r) => setTimeout(r, 1500));
       res.writeHead(204).end();
       return;
@@ -116,7 +156,8 @@ const server = createServer(async (req, res) => {
       args: next.args,
     };
 
-    console.log(`→ ${next.label}  [${next.kind}${next.tool ? `:${next.tool}` : ""}]`);
+    const tag = next.tool ? `:${next.tool}` : "";
+    console.log(`→ ${next.label}  [${next.kind}${tag}]`);
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ job, server_time_ms: Date.now() }));
     return;
@@ -140,7 +181,6 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
 
-    // If all queues are drained, schedule exit.
     const anyPending = [...queues.values()].some((q) => q.length > 0);
     if (!anyPending) scheduleExit("all jobs completed");
     return;
@@ -161,7 +201,9 @@ server.listen(PORT, () => {
   console.log(`  token: ${EXPECTED_TOKEN}`);
   console.log("\nto run the daemon against it:");
   console.log("  cd openhub/apps/daemon");
-  console.log(`  pnpm tsx src/index.ts login http://localhost:${PORT} ${EXPECTED_TOKEN}`);
+  console.log(
+    `  pnpm tsx src/index.ts login http://localhost:${PORT} ${EXPECTED_TOKEN}`,
+  );
   console.log("  pnpm tsx src/index.ts start");
   console.log("");
 });
