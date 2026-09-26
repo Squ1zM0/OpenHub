@@ -7,9 +7,12 @@ them — from scratch or from existing code — without guessing.**
 
 ## Current state
 
-- **Phase:** pre-code, architecture locked
-- **Last session:** repo named OpenHub, README anchor established, `@openhub/manifest` drafted
-- **Next action:** draft `apps/daemon/src/index.ts` poll loop
+- **Phase:** daemon feature-complete for v1
+- **Done:** monorepo scaffold, `@openhub/manifest` schema, `@openhub/protocol` envelope,
+  daemon poll loop, tool registry (10 tools), git-backed checkpoint/restore,
+  mock server covering the full tool surface
+- **Next action:** draft `apps/web` — Vercel side: `/api/poll`, `/api/result`,
+  session store, GitHub App skeleton
 - **Blocked on:** nothing
 
 ---
@@ -108,13 +111,19 @@ openhub/                          # monorepo, this is the product
     daemon/                       # @openhub/daemon — runs on user machine
       src/
         index.ts                  # poll loop
-        auth.ts                   # device-code OAuth
-        tools/                    # read, patch, search, run, git
-        sandbox.ts                # per-session working dir
+        config.ts                 # ~/.openhub/config.json
+        session.ts                # per-session workspace + git init
+        snapshot.ts               # ensureRepo + checkpoint
+        git.ts                    # git CLI wrapper
+        poll.ts                   # long-poll + result post
+        executor.ts               # job → tool dispatch
+        tools/                    # read_file, list_dir, search, write_file,
+                                  # apply_patch, run, git_status, git_diff,
+                                  # git_restore, git_commit
   packages/
     manifest/                     # zod schema for .hub/MANIFEST.json
+    protocol/                     # job/result envelope + HMAC
     capabilities/                 # the vocabulary — versioned primitives
-    protocol/                     # tool-call XML, message envelopes
     github/                       # App auth, installation tokens, PR ops
     agent/                        # shared loop logic
 ```
@@ -208,6 +217,33 @@ pipeline.
 
 ---
 
+## The daemon's tool surface (v1)
+
+| Tool | Purpose |
+|------|---------|
+| `list_dir` | Depth-limited directory listing, ignore-aware |
+| `read_file` | UTF-8 read with line range + byte cap |
+| `search` | Regex search over text files |
+| `write_file` | Whole-file write; checkpoints before overwriting |
+| `apply_patch` | Unified diff; the primary editing tool |
+| `run` | Allowlisted command execution, no shell |
+| `git_status` | Branch, HEAD, working-tree entries |
+| `git_diff` | Working-tree or staged diff, optionally scoped |
+| `git_restore` | Revert a file to a prior ref (default HEAD) |
+| `git_commit` | Explicit commit for narrative history |
+
+**Checkpoints are automatic.** Every mutating tool (`write_file`,
+`apply_patch`) commits the current tree before it writes. So the state
+immediately prior to any edit is always one `git_restore` away. That's the
+undo mechanism — no separate snapshot store.
+
+**`run` never invokes a shell.** Commands are tokenized locally and passed to
+`execFile`, so `;`, `|`, `&&`, `$()`, and backticks are literal characters,
+not operators. Combined with the first-token allowlist and two-token deny
+list, this closes the obvious injection vectors.
+
+---
+
 ## GitHub App
 
 One App, installed per user/org.
@@ -250,6 +286,9 @@ preview-deploys the branch. The `verify` step hits the preview URL.
 | 9 | Daemon ships as `npx openhub` | Zero-install; needs Node on user machine (acceptable v1) |
 | 10 | User brings their own DeepSeek session | Dashboard is control plane, not chat host; avoids login automation |
 | 11 | Manifest schema version field is `manifest_version`, **not** `hub_version` | Schema version ≠ OpenHub version; they will collide later |
+| 12 | **Checkpoint-before-write**, no separate snapshot store | Git is already the undo mechanism; reusing it is free and familiar |
+| 13 | `run` uses `execFile`, never a shell | Removes the injection class entirely; tokenizer handles quoting |
+| 14 | Session workspace is its own git repo | Enables checkpoint/restore without requiring a remote clone |
 
 ---
 
@@ -263,6 +302,8 @@ preview-deploys the branch. The `verify` step hits the preview URL.
 - Do we support non-Next stacks in v1, or is Next the only `kind: web-app`
   target until the vocabulary is proven?
 - How is `DECISIONS.md` written — by the agent, the user, or both?
+- When the session workspace is a real clone (later), do checkpoints stay on
+  the branch or move to a shadow ref?
 
 ---
 
@@ -280,6 +321,9 @@ preview-deploys the branch. The `verify` step hits the preview URL.
 
 **Step 7 is the proof.** If the harness can extend the harness, the
 architecture is real.
+
+Steps 1–2 are complete at the daemon level. What remains for step 2 is the
+Vercel-side counterpart of the poll protocol.
 
 ---
 
@@ -300,4 +344,6 @@ architecture is real.
 - **Hub repo** — any repo containing `.hub/`; native to the architecture
 - **Session** — one open daemon connection scoped to one task
 - **Work item** — one tool call dispatched from Vercel to the daemon
+- **Checkpoint** — a git commit made by a mutating tool before it writes; the
+  undo mechanism
 - **OpenHub** — the tool. `openhub/` is its monorepo. `.hub/` is its marker.
