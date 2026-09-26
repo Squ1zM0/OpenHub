@@ -1,0 +1,46 @@
+name: Strip .js from relative imports
+
+# Manual trigger only. Run once. Idempotent — a second run finds nothing
+# to change and exits without committing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  strip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Strip extensions
+        run: node scripts/strip-js.cjs
+
+      - name: Show diff stat
+        run: git diff --stat
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "::notice::No changes — nothing to strip"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "chore: strip .js extensions from relative imports [skip ci]"
+          git push
+          echo "::notice::Stripped and committed"
