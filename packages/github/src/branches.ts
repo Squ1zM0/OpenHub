@@ -1,7 +1,7 @@
-import type { Octokit } from "@octokit/app";
+import type { InstallationOctokit } from "./app";
 
 export async function getDefaultBranch(
-  octokit: Octokit,
+  octokit: InstallationOctokit,
   owner: string,
   repo: string,
 ): Promise<string> {
@@ -10,7 +10,7 @@ export async function getDefaultBranch(
 }
 
 export async function getBranchSha(
-  octokit: Octokit,
+  octokit: InstallationOctokit,
   owner: string,
   repo: string,
   branch: string,
@@ -28,7 +28,7 @@ export async function getBranchSha(
  * exists, this is a no-op rather than an error.
  */
 export async function ensureBranch(
-  octokit: Octokit,
+  octokit: InstallationOctokit,
   owner: string,
   repo: string,
   branch: string,
