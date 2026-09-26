@@ -1,9 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  HUB_DIR,
-  MANIFEST_FILENAME,
-} from "./constants.js";
+import { HUB_DIR, MANIFEST_FILENAME } from "./constants.js";
 import { Manifest, type Manifest as ManifestType } from "./schema.js";
 import { ManifestError } from "./errors.js";
 
