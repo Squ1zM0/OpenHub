@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { sendJob } from "@/src/lib/tasks.js";
+import { sendJob } from "@/src/lib/tasks";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
