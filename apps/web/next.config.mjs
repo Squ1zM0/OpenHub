@@ -10,30 +10,28 @@ export default {
 
   // Playwright uses dynamic requires and optional native deps. Bundling it
   // breaks. Leave it as a runtime require resolved from node_modules.
-  // For this to work under pnpm, playwright-core must also be a direct
-  // dependency of apps/web (see apps/web/package.json) — otherwise it
-  // lives in the pnpm store and isn't resolvable from the app directory.
+  // Requires playwright-core to also be a direct dependency of apps/web
+  // (see apps/web/package.json) — otherwise it lives in the pnpm store
+  // and isn't resolvable from the app directory.
   serverExternalPackages: ["playwright-core"],
 
   webpack(config) {
-    // Webpack resolves files inside pnpm-symlinked workspace packages using
-    // the *package's* resolution context, not the app's. Setting symlinks
-    // to false forces webpack to resolve the real path first, so the app's
-    // resolver config below applies to the package's files too. Without
-    // this, every relative import inside @openhub/* fails to resolve.
-    config.resolve.symlinks = false;
-
-    // Try TS extensions first for extensionless relative imports.
-    config.resolve.extensions = [
-      ".ts",
-      ".tsx",
-      ...(config.resolve.extensions ?? []).filter(
-        (ext) => ext !== ".ts" && ext !== ".tsx",
-      ),
-    ];
-
-    // Belt-and-suspenders: if any package still has a `.js` specifier
-    // pointing at a `.ts` source, teach webpack to try the TS file first.
+    // Webpack's resolver does not apply `resolve.extensions` to files
+    // reached through node_modules symlinks. Workspace packages under
+    // pnpm are symlinked, so extensionless relative imports inside them
+    // (e.g. `from "./types"`) never resolve, no matter what extensions
+    // are configured.
+    //
+    // `resolve.extensionAlias` runs at the resolver level, before module
+    // resolution — it applies to symlinked paths too. This is the
+    // documented fix for NodeNext-style packages: source carries `.js`
+    // specifiers, and this maps them to the `. thets`/`.tsx` files on disk.
+    //
+    // For this build to work, the packages must use `.js` extensions in their
+    // relative imports. Run the "Restore .js in relative imports" workflow
+    // if they currently don't.
+    //
+    // Reference: CopilotKit PR #5955.
     config.resolve.extensionAlias = {
       ...(config.resolve.extensionAlias ?? {}),
       ".js": [".ts", ".tsx", ".js", ".jsx"],
