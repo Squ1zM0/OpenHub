@@ -1,0 +1,24 @@
+{
+  "name": "@openhub/daemon",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "openhub": "./src/index.ts"
+  },
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts start",
+    "start": "tsx src/index.ts start",
+    "mock-server": "tsx scripts/mock-server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openhub/protocol": "workspace:*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
