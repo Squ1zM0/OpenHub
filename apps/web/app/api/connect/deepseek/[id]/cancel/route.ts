@@ -1,5 +1,5 @@
 import { cancelConnect } from "@openhub/agent";
-import { getConnectStore } from "@/src/lib/credential-store.js";
+import { getConnectStore } from "@/src/lib/credential-store";
 
 export const runtime = "nodejs";
 
