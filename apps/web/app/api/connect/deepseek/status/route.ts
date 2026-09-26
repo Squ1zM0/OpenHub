@@ -1,12 +1,8 @@
 import { DEFAULT_USER_ID } from "@openhub/agent";
-import { getCredentialStore } from "@/src/lib/credential-store.js";
+import { getCredentialStore } from "@/src/lib/credential-store";
 
 export const runtime = "nodejs";
 
-/**
- * Is a DeepSeek account currently connected? Used by the dashboard to
- * decide whether to show "Connect" or "Reconnect".
- */
 export async function GET(): Promise<Response> {
   const creds = await getCredentialStore().get(DEFAULT_USER_ID);
   if (!creds) return Response.json({ connected: false });
