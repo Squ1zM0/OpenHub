@@ -7,11 +7,12 @@ them — from scratch or from existing code — without guessing.**
 
 ## Current state
 
-- **Phase:** poll protocol proven end-to-end
+- **Phase:** GitHub App primitives landed
 - **Done:** monorepo scaffold, `@openhub/manifest` schema, `@openhub/protocol`
-  envelope, daemon poll loop, 10-tool registry, git-backed checkpoint/restore,
+  envelope, daemon poll loop + 10-tool registry + git checkpoint/restore,
   `apps/web` with long-poll `/api/poll`, HMAC-verified `/api/result`, session
-  store, dashboard, browser→daemon→browser round trip
+  store, dashboard, browser→daemon→browser round trip, `@openhub/github` with
+  JWT auth, token minting, branch/commit/PR operations, webhook verification
 - **Next action:** `packages/agent` — the shared loop logic (plan → execute →
   verify → ship) with the DeepSeek adapter mocked
 - **Blocked on:** nothing
@@ -58,79 +59,138 @@ Three pieces, and none of them work without the other two:
 ## Architecture
 
 ```
-Local daemon (apps/daemon)      Vercel / Next (apps/web)
-   |                                |
-   |-- POST /api/poll ------------->|  holds ~25s
-   |                                |  dequeues from session store
-   |<-- { job } or 204 -------------|
-   |                                |
-   |  execute locally               |
-   |                                |
-   |-- POST /api/result ----------->|  HMAC-verified
-   |    x-openhub-signature         |  saved to session store
-   |                                |
-   |-- POST /api/poll ------------->|  re-poll immediately
+Local daemon (apps/daemon)      Vercel / Next (apps/web)        GitHub
+   |                                |                                |
+   |-- POST /api/poll ------------->|  holds ~25s                    |
+   |                                |  dequeues from session store   |
+   |<-- { job } or 204 -------------|                                |
+   |                                |                                |
+   |  execute locally               |                                |
+   |                                |                                |
+   |-- POST /api/result ----------->|  HMAC-verified                 |
+   |    x-openhub-signature         |  saved to session store        |
+   |                                |                                |
+   |-- POST /api/poll ------------->|  re-poll immediately           |
+   |                                |                                |
+   |                                |-- commit branch + open PR ---->|
+   |                                |   (installation token)         |
 ```
 
 **The connection problem, and the fix.** The daemon can't accept inbound
 connections (NAT, laptops, no ngrok). Vercel functions can't hold long-lived
 sockets. So the connection is outbound-from-local, long-polled against Vercel.
-One request held open ~25s, then the daemon re-polls instantly. Latency to
-first tool call: sub-second. No third-party relay, no WebSocket fragility,
-works behind any NAT.
+One request held open ~25s, then the daemon re-polls instantly.
 
 **Ephemeral executor.** The tool executor lives locally and doesn't exist
-until a session opens. A `session_id` scopes the poll. When the session
-closes, polls stop, the workflow stalls, and it eventually times out and
-marks the task abandoned. No cleanup logic — cleanup is just absence of
-polling.
+until a session opens. A `session_id` scopes the poll.
 
 **Cloud agent, local execution.** The agent loop runs in Vercel Workflows.
-The tools run on the user's machine. This is the split.
+The tools run on the user's machine. GitHub operations — branch, commit, PR —
+run in the cloud via `@openhub/github`. The daemon never holds GitHub
+credentials.
 
 ---
 
 ## Repo structure
 
 ```
-openhub/                          # monorepo, this is the product
+openhub/
   apps/
     web/                          # @openhub/web — Next.js control plane
       app/
         api/
-          poll/route.ts           # daemon long-polls here
-          result/route.ts         # daemon posts HMAC-signed results here
-          sessions/route.ts       # create/list sessions
-          sessions/[id]/jobs/     # enqueue a job and wait for its result
-        page.tsx                  # minimal dashboard
+          poll/route.ts
+          result/route.ts
+          sessions/route.ts
+          sessions/[id]/jobs/route.ts
+          github/webhook/route.ts # verify HMAC, ack events
+          github/callback/route.ts # user OAuth callback
+        page.tsx
       src/lib/
-        store.ts                  # SessionStore interface + InMemory impl
-        store-singleton.ts        # globalThis-attached, survives HMR
-        auth.ts                   # bearer + HMAC verify
-        tasks.ts                  # sendJob: enqueue + wait
-    daemon/                       # @openhub/daemon — runs on user machine
+        store.ts
+        store-singleton.ts
+        auth.ts
+        tasks.ts
+    daemon/                       # @openhub/daemon — local executor
       src/
-        index.ts                  # poll loop
-        config.ts                 # ~/.openhub/config.json
-        session.ts                # per-session workspace + git init
-        snapshot.ts               # ensureRepo + checkpoint
-        git.ts                    # git CLI wrapper
-        poll.ts                   # long-poll + result post
-        executor.ts               # job → tool dispatch
-        tools/                    # read_file, list_dir, search, write_file,
-                                  # apply_patch, run, git_status, git_diff,
-                                  # git_restore, git_commit
+        index.ts, config.ts, session.ts, snapshot.ts, git.ts, poll.ts, executor.ts
+        tools/                    # 10 tools
+      scripts/mock-server.ts
   packages/
     manifest/                     # zod schema for .hub/MANIFEST.json
     protocol/                     # job/result envelope + HMAC
+    github/                       # GitHub App primitives ← NEW
+      src/
+        config.ts                 # env parsing
+        app.ts                    # App instance (auth + webhooks + oauth)
+        branches.ts               # get/ensure branch, sha lookup
+        commits.ts                # blob → tree → commit → ref
+        pulls.ts                  # open PR, find existing PR
+        webhooks.ts               # HMAC verification
     capabilities/                 # (not yet) the vocabulary
-    github/                       # (not yet) App auth, installation tokens
     agent/                        # (not yet) shared loop logic
 ```
 
 **Naming note.** `openhub/` is the monorepo. `.hub/` is the marker directory
-that appears inside every *managed* repo — including, eventually, `openhub/`
-itself at bootstrap step 7. Different things, same word, related by intent.
+inside every *managed* repo — including, eventually, `openhub/` itself.
+
+---
+
+## The GitHub App
+
+One App, installed per user/org. Created at
+https://github.com/settings/apps with these permissions:
+
+| Scope | Permission | Why |
+|-------|-----------|-----|
+| Contents | Read & write | Create branches, commit files |
+| Pull requests | Read & write | Open PRs, read status |
+| Metadata | Read | Required by GitHub for any App |
+| Webhooks | — | `push`, `pull_request`, `installation` |
+
+The App's **private key** is PKCS#8. If you download it as PKCS#1, convert:
+```
+openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in key.pem -out key.pkcs8
+```
+
+Set the OAuth callback URL to `https://<your-domain>/api/github/callback`
+and the webhook URL to `https://<your-domain>/api/github/webhook`.
+
+### What `@openhub/github` gives you
+
+```ts
+import { readGitHubEnv, getApp, commitFiles, openPullRequest } from "@openhub/github";
+
+const env = readGitHubEnv();
+const app = getApp(env);
+
+// Mint an installation Octokit (token cached internally, ~60 min).
+const octokit = await app.getInstallationOctokit(installationId);
+
+// Commit a set of files to a branch in one atomic commit.
+const { commitSha } = await commitFiles(
+  octokit, owner, repo, "openhub/task-abc",
+  [{ path: "src/foo.ts", content: "export const x = 1;\n" }],
+  "feat: add foo",
+);
+
+// Open a PR from that branch.
+const pr = await openPullRequest(octokit, {
+  owner, repo,
+  title: "feat: add foo",
+  body: "Generated by OpenHub.",
+  head: "openhub/task-abc",
+  base: "main",
+});
+```
+
+**Why the Git Data API, not the Contents API.** The Contents API creates one
+commit per file and can't express deletions cleanly. The Git Data API
+(`createBlob` → `createTree` → `createCommit` → `updateRef`) produces a single
+reviewable commit with a correct parent. That's what a PR should look like.
+
+**Why `ensureBranch` is idempotent.** Workflow steps retry. A branch that
+already exists is not a failure; it's a resume.
 
 ---
 
@@ -141,62 +201,22 @@ itself at bootstrap step 7. Different things, same word, related by intent.
 {
   "manifest_version": "1",
   "name": "notes",
-  "kind": "web-app",              // web-app | api | worker | static | cli
-  "stack": {
-    "framework": "next",
-    "runtime": "node20",
-    "package_manager": "pnpm"
-  },
+  "kind": "web-app",
+  "stack": { "framework": "next", "package_manager": "pnpm" },
   "capabilities": [
-    { "name": "storage.kv",         "adapter": "vercel-kv", "bind": "KV_URL" },
-    { "name": "storage.blob",       "adapter": "vercel-blob" },
-    { "name": "auth.session",       "adapter": "authjs", "providers": ["github"] },
-    { "name": "email.transactional","adapter": "resend" }
+    { "name": "storage.kv", "adapter": "vercel-kv", "bind": "KV_URL" }
   ],
   "routes": [
-    { "path": "/",          "file": "app/page.tsx",            "kind": "page" },
-    { "path": "/api/notes", "file": "app/api/notes/route.ts",  "kind": "api" }
+    { "path": "/", "file": "app/page.tsx", "kind": "page" }
   ],
-  "data_models": [
-    { "name": "Note",
-      "fields": { "id": "uuid", "body": "text", "created_at": "timestamp" },
-      "store": "storage.kv" }
-  ],
-  "entry_points": { "dev": "pnpm dev", "build": "pnpm build", "test": "pnpm test" },
-  "env_required": ["KV_URL", "AUTH_SECRET", "GITHUB_ID", "GITHUB_SECRET"]
+  "data_models": [],
+  "entry_points": { "dev": "pnpm dev", "build": "pnpm build" },
+  "env_required": ["KV_URL"]
 }
 ```
 
-Companion files in `.hub/`:
-
-- `ARCHITECTURE.md` — why it's shaped this way
-- `DECISIONS.md` — append-only ADR log; agent reads before proposing changes
-- `CAPABILITIES.json` — which primitives are wired in, and where
-
----
-
-## Capabilities
-
-Each capability is a folder with a fixed shape:
-
-```
-packages/capabilities/storage/kv/
-  capability.json     # name, version, deps, exposed interface
-  scaffold/           # files to copy in if the repo lacks them
-  adapters/
-    vercel-kv.ts
-    upstash.ts
-    sqlite.ts         # dev fallback — local mode without cloud
-  wiring.json         # entries to merge into MANIFEST.json on install
-  smoke.test.ts       # harness runs this after install
-```
-
-Installing a capability = copy scaffold + merge wiring into the manifest +
-run smoke tests. That's it.
-
-The agent **composes capabilities; it does not invent libraries.** When the
-user asks for something no capability covers, that's a signal to write a new
-capability — which becomes part of the vocabulary for every future project.
+Companion files in `.hub/`: `ARCHITECTURE.md`, `DECISIONS.md`,
+`CAPABILITIES.json`.
 
 ---
 
@@ -204,82 +224,48 @@ capability — which becomes part of the vocabulary for every future project.
 
 | Tool | Purpose |
 |------|---------|
-| `list_dir` | Depth-limited directory listing, ignore-aware |
+| `list_dir` | Depth-limited directory listing |
 | `read_file` | UTF-8 read with line range + byte cap |
 | `search` | Regex search over text files |
 | `write_file` | Whole-file write; checkpoints before overwriting |
 | `apply_patch` | Unified diff; the primary editing tool |
 | `run` | Allowlisted command execution, no shell |
 | `git_status` | Branch, HEAD, working-tree entries |
-| `git_diff` | Working-tree or staged diff, optionally scoped |
-| `git_restore` | Revert a file to a prior ref (default HEAD) |
+| `git_diff` | Working-tree or staged diff |
+| `git_restore` | Revert a file to a prior ref |
 | `git_commit` | Explicit commit for narrative history |
 
-**Checkpoints are automatic.** Every mutating tool (`write_file`,
-`apply_patch`) commits the current tree before it writes. So the state
-immediately prior to any edit is always one `git_restore` away.
+**Checkpoints are automatic.** Every mutating tool commits the current tree
+before it writes. The state before any edit is one `git_restore` away.
 
 **`run` never invokes a shell.** Commands are tokenized locally and passed to
-`execFile`, so `;`, `|`, `&&`, `$()`, and backticks are literal characters,
-not operators.
+`execFile`, so `;`, `|`, `&&`, `$()`, and backticks are literal characters.
+
+**The daemon holds no GitHub credentials.** Commits and PRs happen in the
+cloud via `@openhub/github`. The daemon edits files; the cloud ships them.
 
 ---
 
 ## Running it locally
 
-Two terminals. First, the control plane:
-
 ```bash
 cd openhub
 pnpm install
 cp apps/web/.env.local.example apps/web/.env.local
+# fill in GITHUB_* values if you want to exercise the GitHub paths
 pnpm --filter @openhub/web dev
 ```
 
-Open http://localhost:3000. Click **Create session**. The page prints the
-`session_id` and the exact daemon command to run.
-
-Second terminal, the daemon:
+Then in another terminal:
 
 ```bash
 cd openhub/apps/daemon
 pnpm tsx src/index.ts login http://localhost:3000 dev-token
-OPENHUB_SESSION_ID=<id-from-the-page> pnpm tsx src/index.ts start
+pnpm tsx src/index.ts start
 ```
 
-Now click **Send job** on the page with the default `list_dir` / `{}`. The
-flow is:
-
-1. Browser → `POST /api/sessions/<id>/jobs`
-2. Server enqueues a `Job` in the session store, then polls for the result
-3. Daemon's open poll request returns the job
-4. Daemon executes `list_dir` against its session workspace
-5. Daemon → `POST /api/result` with an HMAC signature
-6. Server verifies, stores the result
-7. The waiting `sendJob` call sees it and returns
-8. Browser renders the JSON
-
-That round trip is the third anchor. Everything downstream — GitHub App,
-workflow, adapter, preview loop — plugs into this shape.
-
----
-
-## The manifest
-
-(see above)
-
----
-
-## Security
-
-- Daemon authenticates via bearer token; results are HMAC-signed with the
-  same token (v1 simplification — see Open Questions).
-- Session-scoped work items. A hostile Vercel function can't drive another
-  session's daemon without the token.
-- Working dir per session in `~/.openhub/sessions/<id>/`, wiped on close.
-- Destructive tools (`rm`, force-push, DB drop) require an approval click in
-  the web UI, delivered as a special work item. *(not yet implemented)*
-- `run` is allowlisted by first token, with a two-token deny list.
+Open http://localhost:3000. Create a session, send a `list_dir` job, watch it
+round-trip.
 
 ---
 
@@ -287,63 +273,70 @@ workflow, adapter, preview loop — plugs into this shape.
 
 | # | Decision | Rationale |
 |---|----------|-----------|
-| 1 | Repo name `openhub`; npm scope `@openhub/*`; CLI `npx openhub` | Distinct on npm/GitHub; `.hub/` stays as the in-repo marker |
+| 1 | Repo name `openhub`; npm scope `@openhub/*`; CLI `npx openhub` | Distinct; `.hub/` stays as in-repo marker |
 | 2 | Tool executor runs **locally**, ephemeral | No cloud sandbox cost; user's machine is the sandbox |
 | 3 | Transport: local daemon **long-polls** Vercel | Only topology that works behind NAT without relay |
-| 4 | Agent loop runs in **Vercel Workflows** | Each turn is a durable step; survives function timeouts |
-| 5 | Browser automation via **Browserless.io** | Playwright/Chromium won't fit in Vercel's 50MB limit |
-| 6 | **GitHub App**, not PAT | Webhooks + per-installation tokens; needed for preview loop |
-| 7 | Both modes: from-scratch **and** existing repos | Unified by the "manifest missing → generate it" conditional |
-| 8 | Capabilities, **not templates** | Composition beats snapshot; enables indefinite editing |
-| 9 | Daemon ships as `npx openhub` | Zero-install; needs Node on user machine (acceptable v1) |
-| 10 | User brings their own DeepSeek session | Dashboard is control plane, not chat host; avoids login automation |
-| 11 | Manifest schema version field is `manifest_version`, **not** `hub_version` | Schema version ≠ OpenHub version |
+| 4 | Agent loop runs in **Vercel Workflows** | Each turn is a durable step |
+| 5 | Browser automation via **Browserless.io** | Chromium won't fit in Vercel's 50MB limit |
+| 6 | **GitHub App**, not PAT | Webhooks + per-installation tokens |
+| 7 | Both modes: from-scratch **and** existing repos | Unified by "manifest missing → generate it" |
+| 8 | Capabilities, **not templates** | Composition beats snapshot |
+| 9 | Daemon ships as `npx openhub` | Zero-install |
+| 10 | User brings their own DeepSeek session | Dashboard is control plane |
+| 11 | `manifest_version`, not `hub_version` | Schema version ≠ OpenHub version |
 | 12 | **Checkpoint-before-write**, no separate snapshot store | Git is already the undo mechanism |
 | 13 | `run` uses `execFile`, never a shell | Removes the injection class entirely |
-| 14 | Session workspace is its own git repo | Enables checkpoint/restore without a remote clone |
-| 15 | `SessionStore` is an interface; in-memory is the dev impl | Keeps the KV swap a one-liner; makes dev-to-prod honest |
-| 16 | `/api/poll` creates sessions on demand | Daemon may start before the dashboard has heard of the session |
+| 14 | Session workspace is its own git repo | Enables checkpoint/restore without a remote |
+| 15 | `SessionStore` is an interface; in-memory is dev impl | KV swap is a one-liner |
+| 16 | `/api/poll` creates sessions on demand | Daemon may start before dashboard knows |
+| 17 | **Git Data API** for commits, not Contents API | One commit per task; deletions work; correct parent |
+| 18 | **`ensureBranch` is idempotent** | Workflow steps retry; a branch that exists is a resume |
+| 19 | **Daemon holds no GitHub credentials** | Cloud does all GitHub ops; daemon only edits files |
+| 20 | Webhook verification reads **raw body**, not parsed JSON | The signed bytes are the raw bytes; `req.json()` destroys them |
 
 ---
 
 ## Open questions
 
-- **Bearer token and HMAC secret are the same in v1.** Should be split:
-  per-session auth token, per-user signing key. Do this before any real
-  deployment.
-- **In-memory SessionStore is not correct on Vercel.** Two invocations
-  (`/api/poll`, `/api/result`) will not share memory. Requires Vercel KV.
-  Blocking for prod, fine for local dev.
+- **Bearer token and HMAC secret are the same in v1.** Split before deploy.
+- **In-memory `SessionStore` is not correct on Vercel.** Requires KV. Blocking
+  for prod, fine for local dev.
+- **`@octokit/app`'s token cache is per-process.** Every serverless cold start
+  mints a fresh installation token. GitHub's rate limit is generous, so this
+  is probably fine for v1 — but worth measuring.
 - Does the dashboard ever host chat, or is DeepSeek always the frontend?
 - Capability catalog v1 scope — which 6–8 primitives cover the 90% case?
 - Do we support non-Next stacks in v1?
-- How is `DECISIONS.md` written — by the agent, the user, or both?
-- When the session workspace is a real clone (later), do checkpoints stay on
-  the branch or move to a shadow ref?
+- How is `DECISIONS.md` written — agent, user, or both?
+- When the session workspace becomes a real clone (later), do checkpoints stay
+  on the branch or move to a shadow ref?
+- **How does the daemon's workspace become the committed files?** Options:
+  (a) daemon exports changed files, cloud commits them; (b) daemon pushes via
+  Git Data API with a token from the cloud; (c) daemon pushes via `git push`
+  with a token. Decision pending.
 
 ---
 
 ## Build order
 
 1. ✅ `packages/manifest` — schema landed
-2. ✅ **Poll loop** — daemon ↔ web round trip proven via dashboard
-3. **GitHub App** — OAuth, installation tokens, PR open
+2. ✅ **Poll loop** — daemon ↔ web round trip proven
+3. ✅ **GitHub App primitives** — auth, commit, PR, webhook verification
 4. **Agent loop in Workflow** — plan → execute → verify → ship, adapter mocked
 5. **DeepSeek adapter** — swap mock for Browserless
 6. **Capability catalog v1** — 6–8 primitives
-7. **Bootstrap** — `openhub` has its own `.hub/`; use the harness to add the
-   next capability to itself
+7. **Bootstrap** — `openhub` has its own `.hub/`
 
-Steps 1–2 complete. Step 3 is next.
+Steps 1–3 complete. Step 4 is next.
 
 ---
 
 ## Non-goals
 
-- Not a hosted IDE. The user's editor stays the user's editor.
-- Not a template gallery. There is no "pick a theme" step.
-- Not a chat product. Chat is the input method, not the artifact.
-- Not multi-tenant in v1. Single user, single machine, many repos.
+- Not a hosted IDE.
+- Not a template gallery.
+- Not a chat product.
+- Not multi-tenant in v1.
 
 ---
 
@@ -352,9 +345,9 @@ Steps 1–2 complete. Step 3 is next.
 - **Manifest** — `.hub/MANIFEST.json`; the machine-readable description of a repo
 - **Capability** — a composable primitive (`storage.kv`, `auth.session`)
 - **Harness** — the agent loop + tools; not the product
-- **Hub repo** — any repo containing `.hub/`; native to the architecture
+- **Hub repo** — any repo containing `.hub/`
 - **Session** — one open daemon connection scoped to one task
 - **Job** — one tool call dispatched from the web to the daemon
 - **Checkpoint** — a git commit made by a mutating tool before it writes
-- **Control plane** — `apps/web`; the Vercel side that coordinates tasks
+- **Installation token** — a ~60-minute GitHub token scoped to one App installation
 - **OpenHub** — the tool. `openhub/` is its monorepo. `.hub/` is its marker.
