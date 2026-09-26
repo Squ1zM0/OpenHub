@@ -1,16 +1,10 @@
 import { Result } from "@openhub/protocol";
-import { checkBearer, verifySignature } from "@/src/lib/auth.js";
-import { getStore } from "@/src/lib/store-singleton.js";
+import { checkBearer, verifySignature } from "@/src/lib/auth";
+import { getStore } from "@/src/lib/store-singleton";
 
 export const runtime = "nodejs";
 export const maxDuration = 10;
 
-/**
- * The daemon posts results here after executing a job. Signature is verified
- * against the shared token before the result is accepted — a hostile or
- * buggy client that guesses the bearer can't forge a result without also
- * computing the HMAC.
- */
 export async function POST(req: Request): Promise<Response> {
   if (!checkBearer(req)) {
     return new Response("unauthorized", { status: 401 });
