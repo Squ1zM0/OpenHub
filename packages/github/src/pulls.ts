@@ -1,4 +1,4 @@
-import type { Octokit } from "@octokit/core";
+import type { Octokit } from "@octokit/app";
 
 export interface OpenPullRequestOptions {
   owner: string;
