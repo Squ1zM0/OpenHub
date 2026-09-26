@@ -1,12 +1,12 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
-import type { Adapter, AdapterResponse, Message } from "../../types";
+import type { Adapter, AdapterResponse, Message } from "../../types.js";
 import {
   createBrowserlessSession,
   stopBrowserlessSession,
   type BrowserlessSession,
-} from "./browserless";
-import { mergeSelectors } from "./selectors";
-import type { DeepSeekAdapterConfig, DeepSeekSelectors } from "./types";
+} from "./browserless.js";
+import { mergeSelectors } from "./selectors.js";
+import type { DeepSeekAdapterConfig, DeepSeekSelectors } from "./types.js";
 
 const DEEPSEEK_URL = "https://chat.deepseek.com/";
 

@@ -1,6 +1,6 @@
 import { PollResponse, sign } from "@openhub/protocol";
 import type { Job, Result } from "@openhub/protocol";
-import type { Config } from "./config";
+import type { Config } from "./config.js";
 
 const POLL_TIMEOUT_MS = 25_000;
 const RESULT_TIMEOUT_MS = 10_000;

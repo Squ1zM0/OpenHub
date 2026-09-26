@@ -1,8 +1,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { z } from "zod";
-import type { Tool } from "./types";
-import { safeResolve } from "./path";
+import type { Tool } from "./types.js";
+import { safeResolve } from "./path.js";
 
 const Input = z.object({
   pattern: z.string().min(1),

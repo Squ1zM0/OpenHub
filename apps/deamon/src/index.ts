@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
-import { readConfig, writeConfig } from "./config";
-import { Session } from "./session";
-import { poll, postResult } from "./poll";
-import { execute } from "./executor";
+import { readConfig, writeConfig } from "./config.js";
+import { Session } from "./session.js";
+import { poll, postResult } from "./poll.js";
+import { execute } from "./executor.js";
 
 const POLL_BACKOFF_MS = [250, 500, 1000, 2000, 5000];
 

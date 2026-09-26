@@ -1,5 +1,5 @@
 import { App } from "@octokit/app";
-import type { GitHubEnv } from "./config";
+import type { GitHubEnv } from "./config.js";
 
 /**
  * The App instance is the root of every GitHub operation. It holds the App

@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
-import type { Tool } from "./types";
-import { safeResolve } from "./path";
+import type { Tool } from "./types.js";
+import { safeResolve } from "./path.js";
 
 const exec = promisify(execFile);
 

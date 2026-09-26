@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import type { PlaywrightCookie } from "./types";
-import type { DeepSeekSelectors } from "./types";
+import type { PlaywrightCookie } from "./types.js";
+import type { DeepSeekSelectors } from "./types.js";
 
 /**
  * Encrypted credential blob. Cookies give full account access — they never

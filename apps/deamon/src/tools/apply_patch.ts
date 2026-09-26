@@ -1,9 +1,9 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { applyPatch } from "diff";
-import type { Tool } from "./types";
-import { safeResolve } from "./path";
-import { checkpoint } from "../snapshot";
+import type { Tool } from "./types.js";
+import { safeResolve } from "./path.js";
+import { checkpoint } from "../snapshot.js";
 
 const Input = z.object({
   path: z.string().min(1),

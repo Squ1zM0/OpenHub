@@ -1,6 +1,6 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
-import { git } from "./git";
+import { git } from "./git.js";
 
 /**
  * Ensure the session workspace is a git repo. If it already is (e.g. a

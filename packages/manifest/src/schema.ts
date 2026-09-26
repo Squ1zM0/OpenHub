@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MANIFEST_VERSION } from "./constants";
+import { MANIFEST_VERSION } from "./constants.js";
 
 /**
  * Project kind — the top-level shape of the repo. Drives which capability

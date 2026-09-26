@@ -14,8 +14,8 @@
  * selectors.ts.
  */
 import { chromium } from "playwright-core";
-import { createBrowserlessSession, stopBrowserlessSession } from "../src/adapter/deepseek/browserless";
-import { readDeepSeekEnv, parseCookies } from "../src/adapter/deepseek/types";
+import { createBrowserlessSession, stopBrowserlessSession } from "../src/adapter/deepseek/browserless.js";
+import { readDeepSeekEnv, parseCookies } from "../src/adapter/deepseek/types.js";
 
 interface Candidate {
   selector: string;

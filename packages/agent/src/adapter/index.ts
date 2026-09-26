@@ -1,1 +1,1 @@
-export * from "./deepseek/index";
+export * from "./deepseek/index.js";

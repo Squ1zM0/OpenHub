@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Job, Result } from "@openhub/protocol";
-import { getStore } from "./store-singleton";
+import { getStore } from "./store-singleton.js";
 
 const TICK_MS = 200;
 

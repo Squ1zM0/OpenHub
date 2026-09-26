@@ -7,8 +7,8 @@ import {
   type RunTaskResult,
   type ToolCall,
   type ToolResult,
-} from "./types";
-import { buildSystemPrompt } from "./prompt";
+} from "./types.js";
+import { buildSystemPrompt } from "./prompt.js";
 
 const DEFAULT_MAX_TURNS = 12;
 

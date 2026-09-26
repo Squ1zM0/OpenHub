@@ -1,8 +1,8 @@
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import type { Tool } from "./types";
-import { safeResolve } from "./path";
+import type { Tool } from "./types.js";
+import { safeResolve } from "./path.js";
 
 const Input = z.object({
   path: z.string().default("."),

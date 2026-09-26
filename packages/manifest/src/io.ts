@@ -1,8 +1,8 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { HUB_DIR, MANIFEST_FILENAME } from "./constants";
-import { Manifest, type Manifest as ManifestType } from "./schema";
-import { ManifestError } from "./errors";
+import { HUB_DIR, MANIFEST_FILENAME } from "./constants.js";
+import { Manifest, type Manifest as ManifestType } from "./schema.js";
+import { ManifestError } from "./errors.js";
 
 export function manifestPath(repoRoot: string): string {
   return join(repoRoot, HUB_DIR, MANIFEST_FILENAME);

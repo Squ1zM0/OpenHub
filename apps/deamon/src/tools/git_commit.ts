@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { Tool } from "./types";
-import { git } from "../git";
+import type { Tool } from "./types.js";
+import { git } from "../git.js";
 
 const Input = z.object({
   message: z.string().min(1).max(500),
