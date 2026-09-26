@@ -41,8 +41,6 @@ export async function commitFiles(
     throw new Error("commitFiles called with no files");
   }
 
-  // Resolve the parent commit. If caller didn't provide one, use the
-  // current head of the branch.
   const parent =
     parentSha ??
     (
@@ -60,7 +58,6 @@ export async function commitFiles(
   });
   const baseTreeSha = parentCommit.tree.sha;
 
-  // 1. Create a blob for every file. Deletions skip this step.
   const treeEntries = await Promise.all(
     files.map(async (file) => {
       if (file.deleted) {
@@ -89,7 +86,6 @@ export async function commitFiles(
     }),
   );
 
-  // 2. Create a tree on top of the parent tree.
   const { data: newTree } = await octokit.rest.git.createTree({
     owner,
     repo,
@@ -97,7 +93,6 @@ export async function commitFiles(
     tree: treeEntries,
   });
 
-  // 3. Create the commit.
   const { data: newCommit } = await octokit.rest.git.createCommit({
     owner,
     repo,
@@ -106,8 +101,6 @@ export async function commitFiles(
     parents: [parent],
   });
 
-  // 4. Move the branch pointer. Fast-forward by construction — the new
-  //    commit's parent is the branch's current head.
   await octokit.rest.git.updateRef({
     owner,
     repo,
