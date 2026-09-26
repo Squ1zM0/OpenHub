@@ -8,7 +8,7 @@
  *
  * Live view: the session-creation response does NOT include a live URL.
  * Live URLs are minted over CDP via the `Browserless.liveURL` command after
- * a client connects. `getLiveUrl()` below does that.
+ * a client connects. `connect.ts` handles that.
  */
 
 export interface BrowserlessSession {
@@ -35,7 +35,7 @@ export async function createBrowserlessSession(
   const base = normalizeBase(
     opts.baseUrl ?? "https://production-sfo.browserless.io",
   );
-  const ttl = opts.ttlMs ?? 10 * 60 * 1000;
+  const ttl = opts.ttlMs ?? 120_000;
   const url = `${base}/session?token=${encodeURIComponent(opts.token)}`;
 
   const res = await fetch(url, {
