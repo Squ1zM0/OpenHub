@@ -7,7 +7,14 @@ export default {
     "@openhub/manifest",
     "@openhub/protocol",
   ],
-  // Playwright uses dynamic requires and optional native deps. Bundling it
-  // breaks. Leave it as a runtime require resolved from node_modules.
   serverExternalPackages: ["playwright-core"],
+  webpack(config) {
+    config.resolve.extensionAlias = {
+      ...(config.resolve.extensionAlias ?? {}),
+      ".js": [".ts", ".tsx", ".js", ".jsx"],
+      ".mjs": [".mts", ".mjs"],
+      ".cjs": [".cts", ".cjs"],
+    };
+    return config;
+  },
 };
