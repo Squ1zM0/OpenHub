@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { resolve, relative, isAbsolute } from "node:path";
 import { z } from "zod";
 import type { Tool } from "./types.js";
+import { safeResolve } from "./path.js";
 
 const Input = z.object({
   path: z.string().min(1),
@@ -9,19 +9,6 @@ const Input = z.object({
   end: z.number().int().positive().optional(),
   max_bytes: z.number().int().positive().max(1_000_000).default(200_000),
 });
-
-/**
- * Resolve a user-supplied path against the workspace, refusing escapes.
- * Tool inputs come from the cloud and must never traverse outside.
- */
-export function safeResolve(workspace: string, p: string): string {
-  const abs = isAbsolute(p) ? p : resolve(workspace, p);
-  const rel = relative(workspace, abs);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`path escapes workspace: ${p}`);
-  }
-  return abs;
-}
 
 export const readFileTool: Tool<z.infer<typeof Input>> = {
   name: "read_file",
