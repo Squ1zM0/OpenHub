@@ -1,4 +1,4 @@
-import type { Octokit } from "@octokit/app";
+import type { InstallationOctokit } from "./app";
 
 export interface OpenPullRequestOptions {
   owner: string;
@@ -21,7 +21,7 @@ export interface PullRequestRef {
 }
 
 export async function openPullRequest(
-  octokit: Octokit,
+  octokit: InstallationOctokit,
   opts: OpenPullRequestOptions,
 ): Promise<PullRequestRef> {
   const { data } = await octokit.rest.pulls.create({
@@ -48,7 +48,7 @@ export async function openPullRequest(
  * avoid opening a duplicate when a task is retried.
  */
 export async function findOpenPullRequest(
-  octokit: Octokit,
+  octokit: InstallationOctokit,
   owner: string,
   repo: string,
   head: string,
