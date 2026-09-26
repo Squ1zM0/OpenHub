@@ -1,4 +1,4 @@
-import { InMemoryStore, type SessionStore } from "./store.js";
+import { InMemoryStore, type SessionStore } from "./store";
 
 const g = globalThis as unknown as { __openhub_store?: SessionStore };
 
