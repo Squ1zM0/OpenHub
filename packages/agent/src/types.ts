@@ -1,0 +1,125 @@
+import { z } from "zod";
+
+export type Role = "system" | "user" | "assistant";
+
+export interface Message {
+  role: Role;
+  content: string;
+}
+
+export interface ToolCall {
+  name: string;
+  args: unknown;
+  raw: string;
+}
+
+export interface ToolResult {
+  name: string;
+  ok: boolean;
+  result: unknown;
+  error?: string;
+  durationMs: number;
+}
+
+export type AgentEvent =
+  | { type: "turn_start"; turn: number }
+  | { type: "assistant_message"; turn: number; content: string }
+  | { type: "tool_call"; turn: number; call: ToolCall }
+  | { type: "tool_result"; turn: number; result: ToolResult }
+  | { type: "final"; turn: number; content: string }
+  | { type: "error"; turn: number; message: string }
+  | { type: "adapter_note"; turn: number; message: string };
+
+export interface AdapterResponse {
+  content: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+export interface Adapter {
+  readonly name: string;
+  send(
+    messages: Message[],
+    opts?: { signal?: AbortSignal },
+  ): Promise<AdapterResponse>;
+  close?(): Promise<void>;
+}
+
+export type JobDispatcher = (
+  tool: string,
+  args: unknown,
+  opts?: { signal?: AbortSignal },
+) => Promise<JobDispatchResult>;
+
+export type JobDispatchResult =
+  | { status: "ok"; result: unknown; durationMs: number }
+  | { status: "error"; error: string; durationMs: number };
+
+export interface RunTaskOptions {
+  task: string;
+  adapter: Adapter;
+  dispatch: JobDispatcher;
+  maxTurns?: number;
+  onEvent?: (event: AgentEvent) => void;
+  signal?: AbortSignal;
+  systemPromptSuffix?: string;
+}
+
+export type RunTaskStatus = "completed" | "max_turns" | "error" | "aborted";
+
+export interface RunTaskResult {
+  status: RunTaskStatus;
+  finalMessage: string;
+  transcript: Message[];
+  events: AgentEvent[];
+  turns: number;
+  error?: string;
+}
+
+const TOOL_CALL_RE =
+  /<tool_call\s+name="([^"]+)"\s*>([\s\S]*?)<\/tool_call>/g;
+
+export interface ParseResult {
+  calls: ToolCall[];
+  malformed: boolean;
+}
+
+export function parseToolCalls(content: string): ParseResult {
+  const calls: ToolCall[] = [];
+  let m: RegExpExecArray | null;
+  TOOL_CALL_RE.lastIndex = 0;
+  while ((m = TOOL_CALL_RE.exec(content)) !== null) {
+    const name = m[1]!;
+    const body = m[2]!.trim();
+    let args: unknown;
+    try {
+      args = body.length === 0 ? {} : JSON.parse(body);
+    } catch {
+      calls.push({ name, args: null, raw: m[0]! });
+      continue;
+    }
+    calls.push({ name, args, raw: m[0]! });
+  }
+
+  const anyTags = content.includes("<tool_call");
+  return { calls, malformed: anyTags && calls.length === 0 };
+}
+
+export function formatToolResult(result: ToolResult): string {
+  const payload = result.ok
+    ? JSON.stringify(result.result, null, 2)
+    : JSON.stringify({ error: result.error }, null, 2);
+  const attrs = result.ok
+    ? 'name="' + result.name + '"'
+    : 'name="' + result.name + '" error="true"';
+  return "<tool_result " + attrs + ">\n" + payload + "\n</tool_result>";
+}
+
+export const ScriptedResponse = z.union([
+  z.string(),
+  z.object({
+    content: z.string(),
+    when_last: z.string().optional(),
+  }),
+]);
+export type ScriptedResponse = z.infer<typeof ScriptedResponse>;
+// bootstrap 2026-09-26T15:46:31Z
