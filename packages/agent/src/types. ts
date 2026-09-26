@@ -1,0 +1,148 @@
+import { z } from "zod";
+
+/**
+ * Chat message. Roles are the minimum needed to describe a task:
+ *  - system: the standing instructions
+ *  - user: the task, or a tool result injected back
+ *  - assistant: the model's reply (which may contain a tool call)
+ */
+export type Role = "system" | "user" | "assistant";
+
+export interface Message {
+  role: Role;
+  content: string;
+}
+
+export interface ToolCall {
+  name: string;
+  args: unknown;
+  /** The exact substring matched, kept for logging/replay. */
+  raw: string;
+}
+
+export interface ToolResult {
+  name: string;
+  ok: boolean;
+  /** Whatever the daemon returned. JSON-shaped in practice. */
+  result: unknown;
+  /** Set when the tool call itself errored before reaching the daemon. */
+  error?: string;
+  durationMs: number;
+}
+
+export type AgentEvent =
+  | { type: "turn_start"; turn: number }
+  | { type: "assistant_message"; turn: number; content: string }
+  | { type: "tool_call"; turn: number; call: ToolCall }
+  | { type: "tool_result"; turn: number; result: ToolResult }
+  | { type: "final"; turn: number; content: string }
+  | { type: "error"; turn: number; message: string };
+
+export interface AdapterResponse {
+  content: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+export interface Adapter {
+  readonly name: string;
+  send(
+    messages: Message[],
+    opts?: { signal?: AbortSignal },
+  ): Promise<AdapterResponse>;
+}
+
+/**
+ * The loop needs to dispatch tool calls to the daemon but has no direct
+ * dependency on the web app's session store. The caller supplies a dispatcher.
+ */
+export type JobDispatcher = (
+  tool: string,
+  args: unknown,
+  opts?: { signal?: AbortSignal },
+) => Promise<JobDispatchResult>;
+
+export type JobDispatchResult =
+  | { status: "ok"; result: unknown; durationMs: number }
+  | { status: "error"; error: string; durationMs: number };
+
+export interface RunTaskOptions {
+  task: string;
+  adapter: Adapter;
+  dispatch: JobDispatcher;
+  /** Safety valve. Default 12. */
+  maxTurns?: number;
+  onEvent?: (event: AgentEvent) => void;
+  signal?: AbortSignal;
+  /** Extra text appended after the standard system prompt. */
+  systemPromptSuffix?: string;
+}
+
+export type RunTaskStatus = "completed" | "max_turns" | "error" | "aborted";
+
+export interface RunTaskResult {
+  status: RunTaskStatus;
+  finalMessage: string;
+  transcript: Message[];
+  events: AgentEvent[];
+  turns: number;
+  error?: string;
+}
+
+// ─── Wire format: the model's tool calls ────────────────────────────────────
+
+/**
+ * The XML shape the agent is instructed to emit. We keep the regex narrow on
+ * purpose — anything that isn't a well-formed <tool_call> is not a tool call,
+ * and the model gets one more shot at being correct.
+ */
+const TOOL_CALL_RE = /<tool_call\s+name="([^"]+)"\s*>([\s\S]*?)<\/tool_call>/g;
+
+export interface ParseResult {
+  calls: ToolCall[];
+  /** True if the message contained anything that looked like a stray tag. */
+  malformed: boolean;
+}
+
+export function parseToolCalls(content: string): ParseResult {
+  const calls: ToolCall[] = [];
+  let m: RegExpExecArray | null;
+  TOOL_CALL_RE.lastIndex = 0;
+  while ((m = TOOL_CALL_RE.exec(content)) !== null) {
+    const name = m[1]!;
+    const body = m[2]!.trim();
+    let args: unknown;
+    try {
+      args = body.length === 0 ? {} : JSON.parse(body);
+    } catch {
+      // A parse failure is a malformed call — return it with args=null so
+      // the loop can surface a specific error.
+      calls.push({ name, args: null, raw: m[0]! });
+      continue;
+    }
+    calls.push({ name, args, raw: m[0]! });
+  }
+
+  const anyTags = content.includes("<tool_call");
+  return { calls, malformed: anyTags && calls.length === 0 };
+}
+
+/** Encode a tool result as the user message the model sees next. */
+export function formatToolResult(result: ToolResult): string {
+  const payload = result.ok
+    ? JSON.stringify(result.result, null, 2)
+    : JSON.stringify({ error: result.error }, null, 2);
+  const attrs = result.ok ? `name="${result.name}"` : `name="${result.name}" error="true"`;
+  return `<tool_result ${attrs}>\n${payload}\n</tool_result>`;
+}
+
+// ─── Wire schema: what a scripted adapter emits for tests ───────────────────
+
+export const ScriptedResponse = z.union([
+  z.string(),
+  z.object({
+    content: z.string(),
+    /** If set, only used when the last message matches this regex. */
+    when_last: z.string().optional(),
+  }),
+]);
+export type ScriptedResponse = z.infer<typeof ScriptedResponse>;
