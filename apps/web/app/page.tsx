@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface TaskResponse {
   status: string;
@@ -8,6 +8,12 @@ interface TaskResponse {
   turns: number;
   error: string | null;
   events: Array<Record<string, unknown>>;
+}
+
+interface DeepSeekStatus {
+  connected: boolean;
+  connected_at?: string;
+  account_hint?: string | null;
 }
 
 export default function Home() {
@@ -19,8 +25,18 @@ export default function Home() {
   const [task, setTask] = useState(
     "Create a file called notes.txt with the content 'hello from openhub'.",
   );
+  const [adapter, setAdapter] = useState<"scripted" | "deepseek">("scripted");
   const [taskOutput, setTaskOutput] = useState<TaskResponse | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const [ds, setDs] = useState<DeepSeekStatus | null>(null);
+
+  useEffect(() => {
+    fetch("/api/connect/deepseek/status")
+      .then((r) => r.json())
+      .then(setDs)
+      .catch(() => setDs({ connected: false }));
+  }, []);
 
   async function createSession() {
     setBusy(true);
@@ -70,7 +86,7 @@ export default function Home() {
       const res = await fetch("/api/tasks", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, task }),
+        body: JSON.stringify({ session_id: sessionId, task, adapter }),
       });
       const json = (await res.json()) as TaskResponse;
       setTaskOutput(json);
@@ -87,12 +103,44 @@ export default function Home() {
     }
   }
 
+  async function disconnectDeepSeek() {
+    await fetch("/api/connect/deepseek/status", { method: "DELETE" });
+    setDs({ connected: false });
+  }
+
   return (
-    <main style={{ padding: 32, maxWidth: 760, margin: "0 auto" }}>
+    <main style={{ padding: 32, maxWidth: 800, margin: "0 auto" }}>
       <h1 style={{ marginBottom: 4 }}>OpenHub</h1>
       <p style={{ color: "#666", marginTop: 0 }}>
         Control plane. The daemon runs on your machine and polls this server.
       </p>
+
+      <section style={{ marginTop: 24, padding: 16, background: "#f7f7f7", borderRadius: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <strong>DeepSeek</strong>
+            <span style={{ marginLeft: 12, color: ds?.connected ? "#080" : "#a00" }}>
+              {ds === null
+                ? "checking…"
+                : ds.connected
+                  ? `connected${ds.account_hint ? ` (${ds.account_hint})` : ""}`
+                  : "not connected"}
+            </span>
+          </div>
+          <div>
+            {ds?.connected ? (
+              <>
+                <a href="/connect/deepseek" style={{ marginRight: 12 }}>
+                  Reconnect
+                </a>
+                <button onClick={disconnectDeepSeek}>Disconnect</button>
+              </>
+            ) : (
+              <a href="/connect/deepseek">Connect DeepSeek →</a>
+            )}
+          </div>
+        </div>
+      </section>
 
       <section style={{ marginTop: 32 }}>
         <button onClick={createSession} disabled={busy}>
@@ -116,10 +164,20 @@ export default function Home() {
         <>
           <section style={{ marginTop: 32 }}>
             <h3 style={{ marginBottom: 8 }}>Run an agent task</h3>
-            <p style={{ color: "#666", marginTop: 0, fontSize: 14 }}>
-              Scripted adapter for now — the loop runs end-to-end but the
-              model is a fixed sequence. Swap for the DeepSeek adapter later.
-            </p>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ marginRight: 12 }}>
+                adapter:{" "}
+                <select
+                  value={adapter}
+                  onChange={(e) => setAdapter(e.target.value as "scripted" | "deepseek")}
+                >
+                  <option value="scripted">scripted</option>
+                  <option value="deepseek" disabled={!ds?.connected}>
+                    deepseek{ds?.connected ? "" : " (connect first)"}
+                  </option>
+                </select>
+              </label>
+            </div>
             <textarea
               value={task}
               onChange={(e) => setTask(e.target.value)}
@@ -182,7 +240,6 @@ export default function Home() {
                 Send job
               </button>
             </div>
-
             {output && <pre style={{ ...box, marginTop: 16 }}>{output}</pre>}
           </section>
         </>
