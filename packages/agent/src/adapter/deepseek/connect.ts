@@ -14,12 +14,22 @@ import type {
 import type { DeepSeekAdapterConfig, PlaywrightCookie } from "./types";
 
 const DEEPSEEK_URL = "https://chat.deepseek.com/";
-const CONNECT_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Free-tier Browserless caps session duration at 120,000 ms. We set both
+ * the session TTL and the live URL timeout to that ceiling. When the user
+ * needs longer to log in, the poll route re-mints the live URL.
+ *
+ * On a paid plan, raise both to whatever the plan allows.
+ */
+const MAX_SESSION_MS = 120_000;
 
 export interface ConnectConfig {
   browserlessToken: string;
   browserlessUrl: string;
   credentialKeyHex: string;
+  /** Session lifetime in ms. Capped at MAX_SESSION_MS by the Browserless plan. */
+  sessionTtlMs?: number;
   debug?: boolean;
 }
 
@@ -29,20 +39,17 @@ export interface StartConnectResult {
   expiresAt: number;
 }
 
-/**
- * Start a connect flow. Creates a Browserless session, connects Playwright
- * to it, and mints a live URL via the `Browserless.liveURL` CDP command.
- * Returns the live URL the user opens to log in.
- */
 export async function startConnect(
   cfg: ConnectConfig,
   connectStore: ConnectStore,
   userId: string,
 ): Promise<StartConnectResult> {
+  const ttl = Math.min(cfg.sessionTtlMs ?? MAX_SESSION_MS, MAX_SESSION_MS);
+
   const session = await createBrowserlessSession({
     token: cfg.browserlessToken,
     baseUrl: cfg.browserlessUrl,
-    ttlMs: CONNECT_TTL_MS,
+    ttlMs: ttl,
     stealth: true,
     debug: cfg.debug,
   });
@@ -56,7 +63,7 @@ export async function startConnect(
 
     await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded" });
 
-    const liveUrl = await mintLiveUrl(page, CONNECT_TTL_MS, cfg.debug);
+    const liveUrl = await mintLiveUrl(page, ttl, cfg.debug);
 
     const connectId = randomUUID();
     const pending: PendingConnect = {
@@ -66,15 +73,15 @@ export async function startConnect(
       connect_url: session.connectUrl,
       stop_url: session.stopUrl,
       live_url: liveUrl,
-      expires_at: Date.now() + CONNECT_TTL_MS,
+      expires_at: Date.now() + ttl,
       created_at: new Date().toISOString(),
     };
 
-    await connectStore.put(pending, CONNECT_TTL_MS);
+    await connectStore.put(pending, ttl);
 
     if (cfg.debug) {
       console.log(
-        `[deepseek.connect] started ${connectId} session=${session.id}`,
+        `[deepseek.connect] started ${connectId} session=${session.id} ttl=${ttl}ms`,
       );
     }
 
@@ -88,18 +95,10 @@ export async function startConnect(
     await stopBrowserlessSession(session.stopUrl, cfg.debug);
     throw e;
   }
-  // Note: we deliberately do NOT close the browser here. The poll route
-  // reconnects using the same CDP URL. The browser session stays alive
-  // until the user logs in, or the TTL expires.
+  // Browser is intentionally left open — the poll route reconnects using
+  // the same CDP URL to check login state.
 }
 
-/**
- * Mint a live URL for the current page via the Browserless.liveURL CDP
- * command. `timeout` sets how long the URL stays valid, in milliseconds.
- *
- * `interactable: true` lets the viewer click and type — required for the
- * user to log in through the live view. Without it the stream is view-only.
- */
 async function mintLiveUrl(
   page: Page,
   timeoutMs: number,
@@ -108,7 +107,7 @@ async function mintLiveUrl(
   const cdp = await page.context().newCDPSession(page);
 
   const result = (await cdp.send("Browserless.liveURL" as never, {
-    timeout: timeoutMs,
+    timeout: Math.min(timeoutMs, MAX_SESSION_MS),
     interactable: true,
     resizable: true,
     quality: 70,
@@ -140,6 +139,10 @@ export type ConnectStatus =
 
 /**
  * Poll a connect flow. Called by the dashboard every couple of seconds.
+ *
+ * If the live URL has less than 30 seconds of life left and the user still
+ * hasn't logged in, we mint a fresh one. That's what makes the free-tier
+ * 2-minute cap workable — the page gets a new stream instead of dying.
  */
 export async function pollConnect(
   connectId: string,
@@ -169,11 +172,24 @@ export async function pollConnect(
     }
 
     const loggedIn = await detectLoggedIn(page);
+
+    // Re-mint the live URL if it's about to die. Keeps the iframe alive
+    // past the free-tier 120s cap so slow logins still complete.
+    const remaining = pending.expires_at - Date.now();
+    let liveUrl = pending.live_url;
+    if (!loggedIn && remaining < 30_000) {
+      try {
+        liveUrl = await mintLiveUrl(page, MAX_SESSION_MS, cfg.debug);
+      } catch {
+        // If re-minting fails, the old URL keeps working until it expires.
+      }
+    }
+
     if (!loggedIn) {
       await browser.close();
       return {
         status: "pending",
-        liveUrl: pending.live_url,
+        liveUrl,
         expiresAt: pending.expires_at,
         message: "Waiting for login...",
       };
