@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { checkBearer } from "@/src/lib/auth.js";
-import { getStore } from "@/src/lib/store-singleton.js";
+import { checkBearer } from "@/src/lib/auth";
+import { getStore } from "@/src/lib/store-singleton";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -10,14 +10,6 @@ const Body = z.object({
   session_id: z.string().min(1),
 });
 
-/**
- * The daemon long-polls here. We hold the request open for up to HOLD_MS,
- * checking the queue every TICK_MS. If a job appears, return it immediately.
- * If the hold expires, return 204 and the daemon re-polls instantly.
- *
- * Sessions are created on demand — the daemon may start polling before the
- * dashboard has heard about the session.
- */
 const HOLD_MS = 25_000;
 const TICK_MS = 250;
 
