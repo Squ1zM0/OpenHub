@@ -17,18 +17,22 @@ const DEEPSEEK_URL = "https://chat.deepseek.com/";
 
 /**
  * Free-tier Browserless caps session duration at 120,000 ms. We set both
- * the session TTL and the live URL timeout to that ceiling. When the user
- * needs longer to log in, the poll route re-mints the live URL.
- *
- * On a paid plan, raise both to whatever the plan allows.
+ * the session TTL and the live URL timeout to that ceiling. On a paid plan,
+ * raise this.
  */
 const MAX_SESSION_MS = 120_000;
+
+/**
+ * How early to re-mint the live URL before it expires, in ms. Browserless
+ * allows one CDP client per session, so this runs in pollConnect after it
+ * has attached.
+ */
+const LIVE_URL_REFRESH_WINDOW_MS = 30_000;
 
 export interface ConnectConfig {
   browserlessToken: string;
   browserlessUrl: string;
   credentialKeyHex: string;
-  /** Session lifetime in ms. Capped at MAX_SESSION_MS by the Browserless plan. */
   sessionTtlMs?: number;
   debug?: boolean;
 }
@@ -65,6 +69,13 @@ export async function startConnect(
 
     const liveUrl = await mintLiveUrl(page, ttl, cfg.debug);
 
+    // Disconnect the CDP client before returning. The session itself stays
+    // alive server-side for `ttl` ms. If we leave this connection open,
+    // pollConnect cannot attach and the user gets "session is already being
+    // accessed by another client".
+    await browser.close();
+    browser = null;
+
     const connectId = randomUUID();
     const pending: PendingConnect = {
       connect_id: connectId,
@@ -95,8 +106,6 @@ export async function startConnect(
     await stopBrowserlessSession(session.stopUrl, cfg.debug);
     throw e;
   }
-  // Browser is intentionally left open — the poll route reconnects using
-  // the same CDP URL to check login state.
 }
 
 async function mintLiveUrl(
@@ -110,6 +119,7 @@ async function mintLiveUrl(
     timeout: Math.min(timeoutMs, MAX_SESSION_MS),
     interactable: true,
     resizable: true,
+    showBrowserInterface: true,
     quality: 70,
   } as never)) as { liveURL?: string; error?: string | null };
 
@@ -138,11 +148,11 @@ export type ConnectStatus =
   | { status: "not_found" };
 
 /**
- * Poll a connect flow. Called by the dashboard every couple of seconds.
+ * Poll a connect flow.
  *
- * If the live URL has less than 30 seconds of life left and the user still
- * hasn't logged in, we mint a fresh one. That's what makes the free-tier
- * 2-minute cap workable — the page gets a new stream instead of dying.
+ * Each poll attaches via CDP, checks login state, then disconnects before
+ * returning. Only one CDP client at a time — the live URL viewer counts as
+ * a client too, so we can't hold a connection open between polls.
  */
 export async function pollConnect(
   connectId: string,
@@ -173,20 +183,21 @@ export async function pollConnect(
 
     const loggedIn = await detectLoggedIn(page);
 
-    // Re-mint the live URL if it's about to die. Keeps the iframe alive
-    // past the free-tier 120s cap so slow logins still complete.
+    // Re-mint the live URL if it's about to expire. This has to happen
+    // while we have a CDP connection.
     const remaining = pending.expires_at - Date.now();
     let liveUrl = pending.live_url;
-    if (!loggedIn && remaining < 30_000) {
+    if (!loggedIn && remaining < LIVE_URL_REFRESH_WINDOW_MS) {
       try {
         liveUrl = await mintLiveUrl(page, MAX_SESSION_MS, cfg.debug);
       } catch {
-        // If re-minting fails, the old URL keeps working until it expires.
+        // Re-mint failed — old URL keeps working until it expires.
       }
     }
 
     if (!loggedIn) {
       await browser.close();
+      browser = null;
       return {
         status: "pending",
         liveUrl,
