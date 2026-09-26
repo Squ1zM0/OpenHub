@@ -1,5 +1,18 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": [
+    "OPENHUB_DAEMON_TOKEN",
+    "BROWSERLESS_TOKEN",
+    "BROWSERLESS_URL",
+    "DEEPSEEK_CREDENTIAL_KEY",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_CLIENT_ID",
+    "GITHUB_APP_CLIENT_SECRET",
+    "GITHUB_WEBHOOK_SECRET",
+    "COREPACK_HOME",
+    "ENABLE_EXPERIMENTAL_COREPACK"
+  ],
   "tasks": {
     "typecheck": {
       "cache": true,
