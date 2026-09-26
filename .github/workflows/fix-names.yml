@@ -1,0 +1,55 @@
+name: Fix name typos
+
+# One-shot cleanup. Renames:
+#   apps/deamon                          → apps/daemon
+#   apps/daemon/src/tools/read_files.ts  → apps/daemon/src/tools/read_file.ts
+#   apps/daemon/src/tools/write_files.ts → apps/daemon/src/tools/write_file.ts
+#
+# Also rewrites any import in the daemon source that references the old
+# filenames, so the registry stays consistent.
+#
+# Idempotent: a second run finds nothing to rename and exits without
+# committing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fix names
+        run: node scripts/fix-names.cjs
+
+      - name: Show diff
+        run: |
+          git status --short
+          echo "---"
+          git diff --stat
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "::notice::Nothing to fix"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "chore: fix daemon directory and tool filename typos [skip ci]"
+          git push
+          echo "::notice::Renames committed"
