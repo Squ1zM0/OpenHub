@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Job, Result } from "@openhub/protocol";
-import { getStore } from "./store-singleton.js";
+import { getStore } from "./store-singleton";
 
 const TICK_MS = 200;
 
@@ -12,11 +12,6 @@ export type SendJobResult =
   | { status: "ok"; result: Result }
   | { status: "error"; error: string };
 
-/**
- * Enqueue a tool call for a session and wait for the daemon to post the
- * result. This is the server-side shape of one turn: the workflow will call
- * this, block on the result, then decide what to enqueue next.
- */
 export async function sendJob(
   sessionId: string,
   tool: string,
