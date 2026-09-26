@@ -41,13 +41,6 @@ export interface Adapter {
     messages: Message[],
     opts?: { signal?: AbortSignal },
   ): Promise<AdapterResponse>;
-  /**
-   * Optional lifecycle hook. Called by the loop when a task ends (success,
-   * error, or abort). Adapters that hold external resources — browser
-   * sessions, sockets, temp files — should release them here.
-   *
-   * Idempotent: may be called more than once.
-   */
   close?(): Promise<void>;
 }
 
@@ -82,7 +75,8 @@ export interface RunTaskResult {
   error?: string;
 }
 
-const TOOL_CALL_RE = /<tool_call\s+name="([^"]+)"\s*>([\s\S]*?)<\/tool_call>/g;
+const TOOL_CALL_RE =
+  /<tool_call\s+name="([^"]+)"\s*>([\s\S]*?)<\/tool_call>/g;
 
 export interface ParseResult {
   calls: ToolCall[];
@@ -115,9 +109,9 @@ export function formatToolResult(result: ToolResult): string {
     ? JSON.stringify(result.result, null, 2)
     : JSON.stringify({ error: result.error }, null, 2);
   const attrs = result.ok
-    ? `name="${result.name}"`
-    : `name="${result.name}" error="true"`;
-  return `<tool_result ${attrs}>\n${payload}\n</tool_result>`;
+    ? 'name="' + result.name + '"'
+    : 'name="' + result.name + '" error="true"';
+  return "<tool_result " + attrs + ">\n" + payload + "\n</tool_result>";
 }
 
 export const ScriptedResponse = z.union([
