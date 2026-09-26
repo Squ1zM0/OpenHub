@@ -50,31 +50,31 @@ export default function ConnectDeepSeek() {
         const res = await fetch(`/api/connect/deepseek/${id}`);
         const json = await res.json();
         if (json.status === "connected") {
-if (pollRef.current) clearInterval(pollRef.current);
-setState({
-  status: "connected",
-  accountHint: json.accountHint,
-  verified: json.verified ?? [],
-});
-return;
+          if (pollRef.current) clearInterval(pollRef.current);
+          setState({
+            status: "connected",
+            accountHint: json.accountHint,
+            verified: json.verified ?? [],
+          });
+          return;
         }
         if (json.status === "failed" || json.status === "expired") {
-if (pollRef.current) clearInterval(pollRef.current);
-setState(json);
-return;
+          if (pollRef.current) clearInterval(pollRef.current);
+          setState(json);
+          return;
         }
         if (json.status === "pending") {
-setState({
-  status: "pending",
-  liveUrl: json.liveUrl,
-  expiresAt: json.expiresAt,
-  message: json.message,
-});
-return;
+          setState({
+            status: "pending",
+            liveUrl: json.liveUrl,
+            expiresAt: json.expiresAt,
+            message: json.message,
+          });
+          return;
         }
         if (json.status === "not_found") {
-if (pollRef.current) clearInterval(pollRef.current);
-setState({ status: "not_found" });
+          if (pollRef.current) clearInterval(pollRef.current);
+          setState({ status: "not_found" });
         }
       } catch {
         // transient network error — keep polling
@@ -102,79 +102,94 @@ setState({ status: "not_found" });
 
       {state.status === "pending" && (
         <>
-<div
-  style={{
-    marginTop: 16,
-    padding: 12,
-    background: "#e8f4ff",
-    borderRadius: 6,
-    fontSize: 14,
-  }}
->
-  <strong>Log in to DeepSeek in the panel below.</strong> When you're
-  signed in, this page will detect it and finish automatically.
-</div>
+          <div
+            style={{
+              marginTop: 16,
+              padding: 12,
+              background: "#e8f4ff",
+              borderRadius: 6,
+              fontSize: 14,
+            }}
+          >
+            <strong>Log in to DeepSeek in the panel below.</strong> When you're
+            signed in, this page will detect it and finish automatically.
+          </div>
 
-<iframe
-  src={state.liveUrl}
-  style={{
-    marginTop: 16,
-    width: "100%",
-    height: 640,
-    border: "1px solid #ccc",
-    borderRadius: 6,
-  }}
-  allow="clipboard-read; clipboard-write"
-/>
+          <iframe
+            src={state.liveUrl}
+            sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+            allow="clipboard-read; clipboard-write"
+            style={{
+              marginTop: 16,
+              width: "100%",
+              height: 640,
+              border: "1px solid #ccc",
+              borderRadius: 6,
+            }}
+            title="Browserless live browser"
+          />
 
-<div style={{ marginTop: 12 }}>
-  <button onClick={cancel}>Cancel</button>
-</div>
+          <div style={{ marginTop: 12, display: "flex", gap: 12 }}>
+            <button onClick={cancel}>Cancel</button>
+            <a
+              href={state.liveUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ alignSelf: "center" }}
+            >
+              Open in new tab ↗
+            </a>
+          </div>
+
+          <p style={{ marginTop: 12, fontSize: 13, color: "#666" }}>
+            If the panel above doesn't load or won't accept input, use
+            "Open in new tab" instead. The login works the same either way.
+          </p>
         </>
       )}
 
       {state.status === "connected" && (
         <div
-style={{
-  marginTop: 24,
-  padding: 20,
-  background: "#e8ffe8",
-  borderRadius: 6,
-}}
+          style={{
+            marginTop: 24,
+            padding: 20,
+            background: "#e8ffe8",
+            borderRadius: 6,
+          }}
         >
-<h3 style={{ marginTop: 0 }}>Connected ✓</h3>
-{state.accountHint && (
-  <p style={{ marginBottom: 8 }}>
-    Account: <strong>{state.accountHint}</strong>
-  </p>
-)}
-<p style={{ marginBottom: 0, fontSize: 13, color: "#555" }}>
-  Verified selectors: {state.verified.join(", ") || "none"}
-  <br />
-  Stop and message selectors use defaults — they'll be validated on
-  first use.
-</p>
-<div style={{ marginTop: 16 }}>
-  <a href="/">← Back to dashboard</a>
-</div>
+          <h3 style={{ marginTop: 0 }}>Connected ✓</h3>
+          {state.accountHint && (
+            <p style={{ marginBottom: 8 }}>
+              Account: <strong>{state.accountHint}</strong>
+            </p>
+          )}
+          <p style={{ marginBottom: 0, fontSize: 13, color: "#555" }}>
+            Verified selectors: {state.verified.join(", ") || "none"}
+            <br />
+            Stop and message selectors use defaults — they'll be validated on
+            first use.
+          </p>
+          <div style={{ marginTop: 16 }}>
+            <a href="/">← Back to dashboard</a>
+          </div>
         </div>
       )}
 
       {state.status === "failed" && (
         <div style={{ marginTop: 24, color: "#a00" }}>
-<p>Connection failed: {state.error}</p>
-<button onClick={start}>Try again</button>
+          <p>Connection failed: {state.error}</p>
+          <button onClick={start}>Try again</button>
         </div>
       )}
 
       {(state.status === "expired" || state.status === "not_found") && (
         <div style={{ marginTop: 24 }}>
-<p>
-  {state.status === "expired"
-    ? "The connect session timed out."
-    : "That connect session is no longer active."}
-</p>
-<button onClick={start}>Start over</button>
+          <p>
+            {state.status === "expired"
+              ? "The connect session timed out."
+              : "That connect session is no longer active."}
+          </p>
+          <button onClick={start}>Start over</button>
         </div>
       )}
     </main>
