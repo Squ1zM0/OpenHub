@@ -3,10 +3,14 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "dependencies": {
     "@openhub/protocol": "workspace:*",
@@ -19,6 +23,10 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "discover-selectors": "tsx scripts/discover-selectors.ts"
-  }
+    "discover-selectors": "tsx scripts/discover-selectors.ts",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "files": [
+    "dist"
+  ]
 }
