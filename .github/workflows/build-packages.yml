@@ -1,0 +1,42 @@
+name: Configure package builds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure packages
+        run: node scripts/configure-packages.cjs
+
+      - name: Show diff
+        run: git diff --stat
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "::notice::Nothing to configure"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "build: compile workspace packages to dist [skip ci]"
+          git push
+          echo "::notice::Package build config committed"
