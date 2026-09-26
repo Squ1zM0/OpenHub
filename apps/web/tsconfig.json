@@ -10,7 +10,8 @@
     "plugins": [{ "name": "next" }],
     "paths": {
       "@/*": ["./*"]
-    }
+    },
+    "exactOptionalPropertyTypes": false
   },
   "include": [
     "next-env.d.ts",
