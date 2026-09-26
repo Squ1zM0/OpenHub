@@ -1,0 +1,29 @@
+name: Generate credential key
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate 32-byte hex key
+        run: |
+          KEY=$(openssl rand -hex 32)
+          {
+            echo "## DEEPSEEK_CREDENTIAL_KEY"
+            echo ""
+            echo "Copy this value into Vercel:"
+            echo ""
+            echo '```'
+            echo "$KEY"
+            echo '```'
+            echo ""
+            echo "Length: ${#KEY}"
+            echo ""
+            echo "This value is not stored anywhere by this workflow."
+            echo "Delete this workflow after use."
+          } >> "$GITHUB_STEP_SUMMARY"
