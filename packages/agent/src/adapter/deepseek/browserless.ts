@@ -2,28 +2,25 @@
  * Browserless.io session management.
  *
  * Endpoints used:
- *   POST /session?token=...    → create a session (supports live=true)
+ *   POST /session?token=...    → create a session
  *   CDP connect URL            → consumed by playwright.chromium.connectOverCDP
  *   DELETE stop URL            → release early (TTL is the backstop)
  *
- * Live view: when `live: true` is set, the response includes a `liveURL`
- * suitable for embedding in an iframe. This is what lets the user log in
- * through the dashboard instead of exporting cookies manually.
+ * Live view: the session-creation response does NOT include a live URL.
+ * Live URLs are minted over CDP via the `Browserless.liveURL` command after
+ * a client connects. `getLiveUrl()` below does that.
  */
 
 export interface BrowserlessSession {
   id: string;
   connectUrl: string;
   stopUrl: string;
-  /** Present when the session was created with live=true. */
-  liveUrl?: string;
 }
 
 export interface CreateSessionOptions {
   token: string;
   baseUrl?: string;
   ttlMs?: number;
-  live?: boolean;
   stealth?: boolean;
   debug?: boolean;
 }
@@ -39,10 +36,8 @@ export async function createBrowserlessSession(
     opts.baseUrl ?? "https://production-sfo.browserless.io",
   );
   const ttl = opts.ttlMs ?? 10 * 60 * 1000;
-  const params = new URLSearchParams({ token: opts.token });
-  if (opts.live) params.set("live", "true");
+  const url = `${base}/session?token=${encodeURIComponent(opts.token)}`;
 
-  const url = `${base}/session?${params.toString()}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -63,8 +58,6 @@ export async function createBrowserlessSession(
     id?: string;
     connect?: string;
     stop?: string;
-    liveURL?: string;
-    liveUrl?: string;
   };
 
   if (!json.id || !json.connect) {
@@ -74,17 +67,15 @@ export async function createBrowserlessSession(
   }
 
   if (opts.debug) {
-    console.log(
-      `[browserless] session created: ${json.id}${json.liveURL || json.liveUrl ? " (live)" : ""}`,
-    );
+    console.log(`[browserless] session created: ${json.id}`);
   }
 
   return {
     id: json.id,
     connectUrl: json.connect,
     stopUrl:
-      json.stop ?? `${base}/session/${json.id}?token=${encodeURIComponent(opts.token)}`,
-    liveUrl: json.liveURL ?? json.liveUrl,
+      json.stop ??
+      `${base}/session/${json.id}?token=${encodeURIComponent(opts.token)}`,
   };
 }
 
