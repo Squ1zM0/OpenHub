@@ -1,4 +1,4 @@
-import type { Octokit } from "@octokit/app";
+import type { InstallationOctokit } from "./app";
 
 export interface FileChange {
   path: string;
@@ -29,7 +29,7 @@ export interface CommitResult {
  * just created from another branch).
  */
 export async function commitFiles(
-  octokit: Octokit,
+  octokit: InstallationOctokit,
   owner: string,
   repo: string,
   branch: string,
