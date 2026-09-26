@@ -3,36 +3,21 @@ import { z } from "zod";
 import { applyPatch } from "diff";
 import type { Tool } from "./types.js";
 import { safeResolve } from "./path.js";
+import { checkpoint } from "../snapshot.js";
 
 const Input = z.object({
   path: z.string().min(1),
-  /**
-   * Unified diff. May include full `--- a/...` / `+++ b/...` headers or just
-   * one or more `@@ ... @@` hunks. If headers are omitted, they're synthesized
-   * from `path`.
-   */
   patch: z.string().min(1),
-  /** If true, compute and return the result without writing. */
   dry_run: z.boolean().default(false),
   max_bytes: z.number().int().positive().max(10_000_000).default(2_000_000),
 });
 
-/**
- * Synthesize missing file headers. The `diff` package tolerates both forms,
- * but being explicit makes the applied change self-describing in error output.
- */
 function normalizePatch(path: string, patch: string): string {
   const trimmed = patch.replace(/^\s+/, "");
   if (trimmed.startsWith("---")) return patch;
   return `--- a/${path}\n+++ b/${path}\n${patch}`;
 }
 
-/**
- * Surgical edit. The agent's primary editing tool. Prefer this over
- * `write_file` for any change to an existing file — the patch is reviewable
- * and the failure mode (won't apply) is recoverable, unlike a bad full
- * rewrite.
- */
 export const applyPatchTool: Tool<z.infer<typeof Input>> = {
   name: "apply_patch",
   description:
@@ -55,14 +40,12 @@ export const applyPatchTool: Tool<z.infer<typeof Input>> = {
 
     const originalBytes = Buffer.byteLength(original, "utf8");
     if (originalBytes > args.max_bytes) {
-      throw new Error(`file exceeds max_bytes (${originalBytes} > ${args.max_bytes})`);
+      throw new Error(
+        `file exceeds max_bytes (${originalBytes} > ${args.max_bytes})`,
+      );
     }
 
     const patch = normalizePatch(args.path, args.patch);
-
-    // fuzzFactor: 2 allows the patch to apply if surrounding context lines
-    // have drifted by up to two lines. This is the same tolerance `git apply`
-    // gives by default and handles whitespace/line-shift churn well.
     const result = applyPatch(original, patch, { fuzzFactor: 2 });
 
     if (result === false) {
@@ -75,7 +58,9 @@ export const applyPatchTool: Tool<z.infer<typeof Input>> = {
     const changed = result !== original;
     const resultBytes = Buffer.byteLength(result, "utf8");
 
+    let checkpointSha: string | null = null;
     if (!args.dry_run && changed) {
+      checkpointSha = await checkpoint(ctx.workspace, `apply_patch ${args.path}`);
       await writeFile(abs, result, "utf8");
     }
 
@@ -85,6 +70,7 @@ export const applyPatchTool: Tool<z.infer<typeof Input>> = {
       dry_run: args.dry_run,
       bytes_before: originalBytes,
       bytes_after: resultBytes,
+      checkpoint: checkpointSha,
     };
   },
 };
