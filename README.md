@@ -7,12 +7,13 @@ them — from scratch or from existing code — without guessing.**
 
 ## Current state
 
-- **Phase:** daemon feature-complete for v1
-- **Done:** monorepo scaffold, `@openhub/manifest` schema, `@openhub/protocol` envelope,
-  daemon poll loop, tool registry (10 tools), git-backed checkpoint/restore,
-  mock server covering the full tool surface
-- **Next action:** draft `apps/web` — Vercel side: `/api/poll`, `/api/result`,
-  session store, GitHub App skeleton
+- **Phase:** poll protocol proven end-to-end
+- **Done:** monorepo scaffold, `@openhub/manifest` schema, `@openhub/protocol`
+  envelope, daemon poll loop, 10-tool registry, git-backed checkpoint/restore,
+  `apps/web` with long-poll `/api/poll`, HMAC-verified `/api/result`, session
+  store, dashboard, browser→daemon→browser round trip
+- **Next action:** `packages/agent` — the shared loop logic (plan → execute →
+  verify → ship) with the DeepSeek adapter mocked
 - **Blocked on:** nothing
 
 ---
@@ -57,17 +58,18 @@ Three pieces, and none of them work without the other two:
 ## Architecture
 
 ```
-Local daemon                Vercel
-   |                          |
-   |-- POST /api/poll ------->|  (holds ~25s with Fluid)
-   |                          |  workflow enqueues work
-   |<-- { job } --------------|
-   |                          |
-   |  execute locally         |
-   |                          |
-   |-- POST /api/result ----->|  workflow resumes
-   |                          |
-   |-- POST /api/poll ------->|  (immediately re-polls)
+Local daemon (apps/daemon)      Vercel / Next (apps/web)
+   |                                |
+   |-- POST /api/poll ------------->|  holds ~25s
+   |                                |  dequeues from session store
+   |<-- { job } or 204 -------------|
+   |                                |
+   |  execute locally               |
+   |                                |
+   |-- POST /api/result ----------->|  HMAC-verified
+   |    x-openhub-signature         |  saved to session store
+   |                                |
+   |-- POST /api/poll ------------->|  re-poll immediately
 ```
 
 **The connection problem, and the fix.** The daemon can't accept inbound
@@ -93,21 +95,19 @@ The tools run on the user's machine. This is the split.
 ```
 openhub/                          # monorepo, this is the product
   apps/
-    web/                          # Next.js — dashboard, API, workflows
-      app/api/
-        poll/route.ts             # daemon long-polls here
-        result/route.ts           # daemon posts tool results here
-        github/webhook/route.ts   # GitHub App webhooks
-        github/callback/route.ts  # GitHub App OAuth
-        sessions/route.ts         # create/close sessions
-      workflows/
-        task.ts                   # "use workflow" — the agent loop
-        steps/
-          adapter.ts              # DeepSeek UI send/receive
-          plan.ts                 # decompose intent → steps
-          execute.ts              # dispatch tool calls to daemon
-          verify.ts               # preview URL checks
-          ship.ts                 # PR, merge, deploy
+    web/                          # @openhub/web — Next.js control plane
+      app/
+        api/
+          poll/route.ts           # daemon long-polls here
+          result/route.ts         # daemon posts HMAC-signed results here
+          sessions/route.ts       # create/list sessions
+          sessions/[id]/jobs/     # enqueue a job and wait for its result
+        page.tsx                  # minimal dashboard
+      src/lib/
+        store.ts                  # SessionStore interface + InMemory impl
+        store-singleton.ts        # globalThis-attached, survives HMR
+        auth.ts                   # bearer + HMAC verify
+        tasks.ts                  # sendJob: enqueue + wait
     daemon/                       # @openhub/daemon — runs on user machine
       src/
         index.ts                  # poll loop
@@ -123,9 +123,9 @@ openhub/                          # monorepo, this is the product
   packages/
     manifest/                     # zod schema for .hub/MANIFEST.json
     protocol/                     # job/result envelope + HMAC
-    capabilities/                 # the vocabulary — versioned primitives
-    github/                       # App auth, installation tokens, PR ops
-    agent/                        # shared loop logic
+    capabilities/                 # (not yet) the vocabulary
+    github/                       # (not yet) App auth, installation tokens
+    agent/                        # (not yet) shared loop logic
 ```
 
 **Naming note.** `openhub/` is the monorepo. `.hub/` is the marker directory
@@ -173,9 +173,6 @@ Companion files in `.hub/`:
 - `DECISIONS.md` — append-only ADR log; agent reads before proposing changes
 - `CAPABILITIES.json` — which primitives are wired in, and where
 
-When the agent proposes a change that contradicts a logged decision, it has
-to argue against it explicitly. That's the anti-drift mechanism.
-
 ---
 
 ## Capabilities
@@ -200,20 +197,6 @@ run smoke tests. That's it.
 The agent **composes capabilities; it does not invent libraries.** When the
 user asks for something no capability covers, that's a signal to write a new
 capability — which becomes part of the vocabulary for every future project.
-This is the "create tools to create tools" loop.
-
----
-
-## Two modes, one loop
-
-- **From scratch:** detect intent → choose `kind` + stack → emit minimal
-  `.hub/` → install capabilities → scaffold routes → verify → ship.
-- **Existing repo:** read `.hub/MANIFEST.json`. **If absent, task 1 is always
-  "generate the manifest"** — a reverse-engineering pass over the codebase.
-  Then proceed identically.
-
-That single conditional unifies both modes. There is no separate "import"
-pipeline.
 
 ---
 
@@ -234,40 +217,69 @@ pipeline.
 
 **Checkpoints are automatic.** Every mutating tool (`write_file`,
 `apply_patch`) commits the current tree before it writes. So the state
-immediately prior to any edit is always one `git_restore` away. That's the
-undo mechanism — no separate snapshot store.
+immediately prior to any edit is always one `git_restore` away.
 
 **`run` never invokes a shell.** Commands are tokenized locally and passed to
 `execFile`, so `;`, `|`, `&&`, `$()`, and backticks are literal characters,
-not operators. Combined with the first-token allowlist and two-token deny
-list, this closes the obvious injection vectors.
+not operators.
 
 ---
 
-## GitHub App
+## Running it locally
 
-One App, installed per user/org.
+Two terminals. First, the control plane:
 
-- `/api/github/callback` — user OAuth, stores `user_id → installation_ids`
-- `/api/github/webhook` — verifies HMAC; handles `push`, `pull_request`,
-  `installation`
-- Installation tokens minted on demand, cached 55 min
+```bash
+cd openhub
+pnpm install
+cp apps/web/.env.local.example apps/web/.env.local
+pnpm --filter @openhub/web dev
+```
 
-Every task opens a PR. The PR body carries the manifest diff. Vercel
-preview-deploys the branch. The `verify` step hits the preview URL.
+Open http://localhost:3000. Click **Create session**. The page prints the
+`session_id` and the exact daemon command to run.
+
+Second terminal, the daemon:
+
+```bash
+cd openhub/apps/daemon
+pnpm tsx src/index.ts login http://localhost:3000 dev-token
+OPENHUB_SESSION_ID=<id-from-the-page> pnpm tsx src/index.ts start
+```
+
+Now click **Send job** on the page with the default `list_dir` / `{}`. The
+flow is:
+
+1. Browser → `POST /api/sessions/<id>/jobs`
+2. Server enqueues a `Job` in the session store, then polls for the result
+3. Daemon's open poll request returns the job
+4. Daemon executes `list_dir` against its session workspace
+5. Daemon → `POST /api/result` with an HMAC signature
+6. Server verifies, stores the result
+7. The waiting `sendJob` call sees it and returns
+8. Browser renders the JSON
+
+That round trip is the third anchor. Everything downstream — GitHub App,
+workflow, adapter, preview loop — plugs into this shape.
+
+---
+
+## The manifest
+
+(see above)
 
 ---
 
 ## Security
 
-- Daemon authenticates via device-code OAuth → session token scoped to one
-  user, one workspace, one session.
-- Work items carry a HMAC; daemon verifies before executing. Prevents a
-  hostile Vercel function from driving the user's machine.
-- Working dir per session in `~/.hub/sessions/<id>/`, wiped on close.
+- Daemon authenticates via bearer token; results are HMAC-signed with the
+  same token (v1 simplification — see Open Questions).
+- Session-scoped work items. A hostile Vercel function can't drive another
+  session's daemon without the token.
+- Working dir per session in `~/.openhub/sessions/<id>/`, wiped on close.
 - Destructive tools (`rm`, force-push, DB drop) require an approval click in
-  the web UI, delivered as a special work item.
-- `run` is allowlisted by command prefix; everything else needs approval.
+  the web UI, delivered as a special work item. *(not yet implemented)*
+- `run` is allowlisted by first token, with a two-token deny list.
 
 ---
 
@@ -285,22 +297,26 @@ preview-deploys the branch. The `verify` step hits the preview URL.
 | 8 | Capabilities, **not templates** | Composition beats snapshot; enables indefinite editing |
 | 9 | Daemon ships as `npx openhub` | Zero-install; needs Node on user machine (acceptable v1) |
 | 10 | User brings their own DeepSeek session | Dashboard is control plane, not chat host; avoids login automation |
-| 11 | Manifest schema version field is `manifest_version`, **not** `hub_version` | Schema version ≠ OpenHub version; they will collide later |
-| 12 | **Checkpoint-before-write**, no separate snapshot store | Git is already the undo mechanism; reusing it is free and familiar |
-| 13 | `run` uses `execFile`, never a shell | Removes the injection class entirely; tokenizer handles quoting |
-| 14 | Session workspace is its own git repo | Enables checkpoint/restore without requiring a remote clone |
+| 11 | Manifest schema version field is `manifest_version`, **not** `hub_version` | Schema version ≠ OpenHub version |
+| 12 | **Checkpoint-before-write**, no separate snapshot store | Git is already the undo mechanism |
+| 13 | `run` uses `execFile`, never a shell | Removes the injection class entirely |
+| 14 | Session workspace is its own git repo | Enables checkpoint/restore without a remote clone |
+| 15 | `SessionStore` is an interface; in-memory is the dev impl | Keeps the KV swap a one-liner; makes dev-to-prod honest |
+| 16 | `/api/poll` creates sessions on demand | Daemon may start before the dashboard has heard of the session |
 
 ---
 
 ## Open questions
 
+- **Bearer token and HMAC secret are the same in v1.** Should be split:
+  per-session auth token, per-user signing key. Do this before any real
+  deployment.
+- **In-memory SessionStore is not correct on Vercel.** Two invocations
+  (`/api/poll`, `/api/result`) will not share memory. Requires Vercel KV.
+  Blocking for prod, fine for local dev.
 - Does the dashboard ever host chat, or is DeepSeek always the frontend?
-  (Leaning: never host. Dashboard = tasks, PRs, history.)
 - Capability catalog v1 scope — which 6–8 primitives cover the 90% case?
-- Local fallback adapters: how deep does "local mode without cloud" go?
-  (sqlite for KV, filesystem for blob, console for email?)
-- Do we support non-Next stacks in v1, or is Next the only `kind: web-app`
-  target until the vocabulary is proven?
+- Do we support non-Next stacks in v1?
 - How is `DECISIONS.md` written — by the agent, the user, or both?
 - When the session workspace is a real clone (later), do checkpoints stay on
   the branch or move to a shadow ref?
@@ -309,9 +325,8 @@ preview-deploys the branch. The `verify` step hits the preview URL.
 
 ## Build order
 
-1. `packages/manifest` — zod schema + one capability (`storage.kv`) +
-   daemon that can install it into a local dir
-2. **Poll loop** — daemon ↔ Vercel, single job round-trip
+1. ✅ `packages/manifest` — schema landed
+2. ✅ **Poll loop** — daemon ↔ web round trip proven via dashboard
 3. **GitHub App** — OAuth, installation tokens, PR open
 4. **Agent loop in Workflow** — plan → execute → verify → ship, adapter mocked
 5. **DeepSeek adapter** — swap mock for Browserless
@@ -319,11 +334,7 @@ preview-deploys the branch. The `verify` step hits the preview URL.
 7. **Bootstrap** — `openhub` has its own `.hub/`; use the harness to add the
    next capability to itself
 
-**Step 7 is the proof.** If the harness can extend the harness, the
-architecture is real.
-
-Steps 1–2 are complete at the daemon level. What remains for step 2 is the
-Vercel-side counterpart of the poll protocol.
+Steps 1–2 complete. Step 3 is next.
 
 ---
 
@@ -343,7 +354,7 @@ Vercel-side counterpart of the poll protocol.
 - **Harness** — the agent loop + tools; not the product
 - **Hub repo** — any repo containing `.hub/`; native to the architecture
 - **Session** — one open daemon connection scoped to one task
-- **Work item** — one tool call dispatched from Vercel to the daemon
-- **Checkpoint** — a git commit made by a mutating tool before it writes; the
-  undo mechanism
+- **Job** — one tool call dispatched from the web to the daemon
+- **Checkpoint** — a git commit made by a mutating tool before it writes
+- **Control plane** — `apps/web`; the Vercel side that coordinates tasks
 - **OpenHub** — the tool. `openhub/` is its monorepo. `.hub/` is its marker.
