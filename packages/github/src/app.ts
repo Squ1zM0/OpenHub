@@ -1,19 +1,19 @@
 import { App } from "@octokit/app";
-import type { GitHubEnv } from "./config.js";
+import type { GitHubEnv } from "./config";
 
 /**
- * The App instance is the root of every GitHub operation. It holds the App
- * private key and webhook secret, and it mints installation tokens on demand.
+ * The type returned by `app.getInstallationOctokit(id)`.
  *
- * `@octokit/app` caches installation tokens internally (in an LRU keyed by
- * installation id, expiring ~1 minute before GitHub's 60-minute lifetime).
- * In a long-lived server that cache is a real win. In a serverless function
- * every cold start loses it — see the README Open Questions.
- *
- * The private key must be PKCS#8 (the format GitHub serves). If you're
- * loading a PKCS#1 key from a PEM file, convert it:
- *   openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in key.pem -out key.pkcs8
+ * `@octokit/app` exports the `App` class but not the composed Octokit type
+ * that its installation method returns. That composed type is what carries
+ * the `.rest` namespace (REST endpoint methods, pagination, auth). We derive
+ * it from the method signature rather than importing from `@octokit/core`,
+ * which only gives the bare client without `.rest`.
  */
+export type InstallationOctokit = Awaited<
+  ReturnType<InstanceType<typeof App>["getInstallationOctokit"]>
+>;
+
 export function createApp(env: GitHubEnv): App {
   return new App({
     appId: env.GITHUB_APP_ID,
