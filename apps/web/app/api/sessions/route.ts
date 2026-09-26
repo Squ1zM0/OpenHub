@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getStore } from "@/src/lib/store-singleton.js";
+import { getStore } from "@/src/lib/store-singleton";
 
 export const runtime = "nodejs";
 
