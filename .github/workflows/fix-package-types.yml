@@ -1,0 +1,42 @@
+name: Add Node types to packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Patch packages
+        run: node scripts/fix-package-types.cjs
+
+      - name: Show diff
+        run: git diff --stat
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "::notice::Nothing to change"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "build: add @types/node and node lib to package builds [skip ci]"
+          git push
+          echo "::notice::Committed"
