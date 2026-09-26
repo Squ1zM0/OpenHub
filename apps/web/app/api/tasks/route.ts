@@ -11,8 +11,8 @@ import {
   type JobDispatcher,
   type Message,
 } from "@openhub/agent";
-import { sendJob } from "@/src/lib/tasks.js";
-import { getCredentialStore } from "@/src/lib/credential-store.js";
+import { sendJob } from "@/src/lib/tasks";
+import { getCredentialStore } from "@/src/lib/credential-store";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
