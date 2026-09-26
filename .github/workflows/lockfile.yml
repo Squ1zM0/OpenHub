@@ -1,0 +1,116 @@
+name: Regenerate lockfile
+
+# Manual trigger only. You do not want a bot committing lockfile changes
+# on every push — that would create commit noise and race with your own
+# edits. Run it deliberately when package.json changes.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch to regenerate the lockfile on"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          # Use a token that can push. The default GITHUB_TOKEN works
+          # because we set `permissions: contents: write` above.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read pinned pnpm version from package.json
+        id: pm
+        run: |
+          VERSION=$(node -e '
+            const pkg = require("./package.json");
+            const m = (pkg.packageManager || "").match(/^pnpm@(.+)$/);
+            if (!m) { console.error("no packageManager field"); process.exit(1); }
+            process.stdout.write(m[1]);
+          ')
+          echo "pnpm_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Using pnpm ${VERSION}"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pm.outputs.pnpm_version }}
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # Deliberately NOT enabling pnpm cache here — we're regenerating
+          # the lockfile, so a cache keyed on the old lockfile is useless.
+
+      - name: Confirm pnpm version
+        run: pnpm --version
+
+      - name: Remove any existing lockfile
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            echo "Removing existing pnpm-lock.yaml"
+            rm -f pnpm-lock.yaml
+          else
+            echo "No existing lockfile — generating fresh"
+          fi
+
+      - name: Install (generates lockfile)
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Verify lockfile was produced
+        run: |
+          if [ ! -f pnpm-lock.yaml ]; then
+            echo "::error::pnpm install did not produce pnpm-lock.yaml"
+            exit 1
+          fi
+          LINES=$(wc -l < pnpm-lock.yaml | tr -d ' ')
+          BYTES=$(wc -c < pnpm-lock.yaml | tr -d ' ')
+          VER=$(grep -m1 '^lockfileVersion:' pnpm-lock.yaml | awk '{print $2}')
+          echo "lockfileVersion: ${VER}"
+          echo "lines: ${LINES}"
+          echo "bytes: ${BYTES}"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- pnpm-lock.yaml 2>/dev/null && \
+             git ls-files --error-unmatch pnpm-lock.yaml >/dev/null 2>&1; then
+            echo "::notice::Lockfile unchanged — nothing to commit"
+            exit 0
+          fi
+
+          git add pnpm-lock.yaml
+          git commit -m "chore: regenerate lockfile [skip ci]"
+          git push origin HEAD:${{ inputs.ref }}
+          echo "::notice::Lockfile committed to ${{ inputs.ref }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Lockfile regeneration"
+            echo ""
+            echo "- pnpm version: ${{ steps.pm.outputs.pnpm_version }}"
+            echo "- branch: ${{ inputs.ref }}"
+            echo "- node: 22"
+            echo ""
+            if [ -f pnpm-lock.yaml ]; then
+              echo "Lockfile present after run."
+            else
+              echo "**No lockfile produced — the install step failed.**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
