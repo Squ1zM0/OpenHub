@@ -1,0 +1,41 @@
+name: Restore .js in relative imports
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore .js extensions
+        run: node scripts/restore-js.cjs
+
+      - name: Show diff stat
+        run: git diff --stat
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "::notice::No changes — nothing to restore"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "chore: restore .js extensions for webpack extensionAlias [skip ci]"
+          git push
