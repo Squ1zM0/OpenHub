@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@openhub/agent": "workspace:*",
+    "@openhub/github": "workspace:*",
     "@openhub/manifest": "workspace:*",
     "@openhub/protocol": "workspace:*",
     "next": "^15.0.0",
