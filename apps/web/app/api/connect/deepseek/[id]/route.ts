@@ -2,20 +2,11 @@ import { readDeepSeekEnv, pollConnect } from "@openhub/agent";
 import {
   getConnectStore,
   getCredentialStore,
-} from "@/src/lib/credential-store.js";
+} from "@/src/lib/credential-store";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-/**
- * Poll a connect flow. Returns one of:
- *   pending   — still waiting for login
- *   connected — captured and stored
- *   failed / expired / not_found
- *
- * Calling this when the flow is already complete returns not_found, because
- * the pending record is deleted on success.
- */
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
