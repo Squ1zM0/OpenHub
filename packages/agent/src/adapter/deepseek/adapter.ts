@@ -1,6 +1,10 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import type { Adapter, AdapterResponse, Message } from "../../types.js";
-import { createBrowserlessSession, stopBrowserlessSession, type BrowserlessSession } from "./browserless.js";
+import {
+  createBrowserlessSession,
+  stopBrowserlessSession,
+  type BrowserlessSession,
+} from "./browserless.js";
 import { mergeSelectors } from "./selectors.js";
 import type { DeepSeekAdapterConfig, DeepSeekSelectors } from "./types.js";
 
@@ -11,27 +15,20 @@ interface InternalState {
   browser: Browser;
   context: BrowserContext;
   page: Page;
-  /** How many transcript messages we've already sent to the UI. */
   sentCount: number;
 }
 
 /**
  * DeepSeek adapter driven by Browserless + Playwright.
  *
- * Lifecycle: lazy-open on first send(), close() releases the browser session.
- * The loop calls close() in a finally, so leaks are bounded by the loop's
- * lifetime.
- *
- * Message mapping: the DeepSeek web UI has no system-prompt slot, so on the
- * first send() the system message and the first user message are concatenated
- * into one prompt. Subsequent sends only push the *delta* of new messages —
- * the loop only appends, so we can track a cursor.
+ * Credentials come from the connect flow: the caller decrypts stored
+ * cookies + selectors and passes them in via config.
  */
 export class DeepSeekAdapter implements Adapter {
   readonly name = "deepseek";
-  private readonly cfg: Required<
-    Omit<DeepSeekAdapterConfig, "selectors">
-  > & { selectors: DeepSeekSelectors };
+  private readonly cfg: Required<Omit<DeepSeekAdapterConfig, "selectors">> & {
+    selectors: DeepSeekSelectors;
+  };
   private state: InternalState | null = null;
   private closing = false;
 
@@ -53,34 +50,19 @@ export class DeepSeekAdapter implements Adapter {
     messages: Message[],
     opts?: { signal?: AbortSignal },
   ): Promise<AdapterResponse> {
-    if (this.closing) {
-      throw new Error("adapter is closing");
-    }
+    if (this.closing) throw new Error("adapter is closing");
 
     const state = await this.ensureOpen();
-    const delta = this.computeDelta(messages, state.sentCount);
-
+    const delta = messages.slice(state.sentCount);
     if (delta.length === 0) {
-      throw new Error(
-        "send() called with no new messages since the last call — this is a loop bug",
-      );
+      throw new Error("send() called with no new messages since last call");
     }
 
-    // Concatenate the delta into a single prompt. On turn 1 this is
-    // system + task; on later turns it's just the injected tool result.
-    const prompt = delta
-      .map((m) => this.formatForUI(m))
-      .join("\n\n---\n\n");
-
+    const prompt = delta.map((m) => this.formatForUI(m)).join("\n\n---\n\n");
     const beforeCount = await this.countAssistantMessages(state.page);
 
     await this.typeAndSend(state.page, prompt, opts?.signal);
-
-    const text = await this.waitForReply(
-      state.page,
-      beforeCount,
-      opts?.signal,
-    );
+    const text = await this.waitForReply(state.page, beforeCount, opts?.signal);
 
     state.sentCount = messages.length;
     return { content: text };
@@ -89,21 +71,16 @@ export class DeepSeekAdapter implements Adapter {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
-
     const s = this.state;
     this.state = null;
     if (!s) return;
-
     try {
       await s.browser.close();
     } catch (e) {
       this.log(`browser.close failed: ${(e as Error).message}`);
     }
-
     await stopBrowserlessSession(s.session.stopUrl, this.cfg.debug);
   }
-
-  // ─── Internals ────────────────────────────────────────────────────────────
 
   private log(msg: string): void {
     if (this.cfg.debug) console.log(`[deepseek] ${msg}`);
@@ -120,48 +97,39 @@ export class DeepSeekAdapter implements Adapter {
       debug: this.cfg.debug,
     });
 
-    this.log(`connecting playwright via CDP`);
+    this.log("connecting playwright via CDP");
     const browser = await chromium.connectOverCDP(session.connectUrl);
-
     const context = browser.contexts()[0] ?? (await browser.newContext());
     if (this.cfg.cookies.length > 0) {
       await context.addCookies(this.cfg.cookies);
     }
-
     const page = context.pages()[0] ?? (await context.newPage());
 
     this.log(`navigating to ${DEEPSEEK_URL}`);
     await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded" });
-
     await this.assertLoggedIn(page);
     await this.startNewChat(page);
 
-    const state: InternalState = {
-      session,
-      browser,
-      context,
-      page,
-      sentCount: 0,
-    };
+    const state: InternalState = { session, browser, context, page, sentCount: 0 };
     this.state = state;
     return state;
   }
 
   private async assertLoggedIn(page: Page): Promise<void> {
-    const candidates = this.cfg.selectors.loggedInIndicator;
-    const found = await this.firstMatch(page, candidates, 15_000);
+    const found = await this.firstMatch(
+      page,
+      this.cfg.selectors.loggedInIndicator,
+      15_000,
+    );
     if (!found) {
       throw new Error(
-        `not logged in to chat.deepseek.com — none of these selectors matched: ` +
-          candidates.join(", ") +
-          `. Update DEEPSEEK_COOKIES with a fresh session, or run the ` +
-          `discover-selectors script.`,
+        "not logged in — the stored credentials may have expired. " +
+          "Reconnect DeepSeek from the dashboard.",
       );
     }
   }
 
   private async startNewChat(page: Page): Promise<void> {
-    // Best-effort. If we're already on a fresh chat, this is a no-op.
     for (const sel of this.cfg.selectors.newChatButton) {
       try {
         const el = page.locator(sel).first();
@@ -171,27 +139,14 @@ export class DeepSeekAdapter implements Adapter {
           return;
         }
       } catch {
-        // try next candidate
+        // try next
       }
     }
   }
 
-  private computeDelta(messages: Message[], sentCount: number): Message[] {
-    if (messages.length <= sentCount) return [];
-    return messages.slice(sentCount);
-  }
-
-  /**
-   * Merge the system prompt into the first user message. DeepSeek's UI has
-   * no system slot, and starting with a bare system message would just look
-   * like a user message anyway.
-   */
   private formatForUI(m: Message): string {
     if (m.role === "system") return `### Instructions\n\n${m.content}`;
     if (m.role === "user") return m.content;
-    // Assistant messages in the delta are rare — the loop only ever appends
-    // assistant text after the model produced it, so re-sending it would be
-    // duplication. But if it happens, prefix it clearly.
     return `[previous assistant turn]\n\n${m.content}`;
   }
 
@@ -205,14 +160,12 @@ export class DeepSeekAdapter implements Adapter {
     const input = await this.firstMatch(page, this.cfg.selectors.input, 10_000);
     if (!input) {
       throw new Error(
-        `chat input not found — tried: ${this.cfg.selectors.input.join(", ")}`,
+        `chat input not found — tried: ${this.cfg.selectors.input.join(", ")}. ` +
+          "Reconnect DeepSeek to rediscover selectors.",
       );
     }
 
     await input.click();
-    // fill() is atomic; type() is per-keystroke and can trigger re-renders
-    // mid-message on some React textareas. Prefer fill() when the element
-    // supports it, fall back to keyboard for contenteditable.
     try {
       await input.fill(text, { timeout: 5000 });
     } catch {
@@ -220,7 +173,6 @@ export class DeepSeekAdapter implements Adapter {
       await page.keyboard.type(text, { delay: 1 });
     }
 
-    // Prefer clicking a send button if we can find one; otherwise Enter.
     const send = await this.firstMatch(
       page,
       this.cfg.selectors.sendButton,
@@ -239,12 +191,8 @@ export class DeepSeekAdapter implements Adapter {
     signal?: AbortSignal,
   ): Promise<string> {
     const deadline = Date.now() + this.cfg.responseTimeoutMs;
-
-    // Phase 1: wait for a new assistant message to appear.
     await this.waitForNewAssistantMessage(page, beforeCount, deadline, signal);
 
-    // Phase 2: wait for generation to finish. Two signals, and we require
-    // both: stop button gone, and text stable.
     let lastText = "";
     let stableSince = Date.now();
 
@@ -265,9 +213,7 @@ export class DeepSeekAdapter implements Adapter {
       }
 
       if (!stopVisible && Date.now() - stableSince >= this.cfg.stabilityMs) {
-        if (text.trim().length === 0) {
-          throw new Error("assistant message was empty");
-        }
+        if (text.trim().length === 0) throw new Error("assistant message was empty");
         return text;
       }
     }
@@ -336,16 +282,15 @@ export class DeepSeekAdapter implements Adapter {
     return false;
   }
 
-  /**
-   * Return the first locator from a candidate list that is visible. Returns
-   * null if none match within the timeout.
-   */
   private async firstMatch(
     page: Page,
     candidates: readonly string[],
     timeoutMs: number,
   ) {
-    const perCandidate = Math.max(200, Math.floor(timeoutMs / candidates.length));
+    const perCandidate = Math.max(
+      200,
+      Math.floor(timeoutMs / candidates.length),
+    );
     for (const sel of candidates) {
       try {
         const loc = page.locator(sel).first();
