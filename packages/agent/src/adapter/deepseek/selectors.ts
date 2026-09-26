@@ -1,4 +1,4 @@
-import type { DeepSeekSelectors } from "./types.js";
+import type { DeepSeekSelectors } from "./types";
 
 /**
  * Default selector candidates for chat.deepseek.com.

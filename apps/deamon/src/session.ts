@@ -1,7 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { CONFIG_DIR } from "./config.js";
-import { ensureRepo } from "./snapshot.js";
+import { CONFIG_DIR } from "./config";
+import { ensureRepo } from "./snapshot";
 
 /**
  * A session is one open poll loop scoped to one cloud-side task. The workspace

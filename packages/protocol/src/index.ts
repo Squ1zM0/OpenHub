@@ -1,2 +1,2 @@
-export * from "./envelope.js";
-export * from "./hmac.js";
+export * from "./envelope";
+export * from "./hmac";

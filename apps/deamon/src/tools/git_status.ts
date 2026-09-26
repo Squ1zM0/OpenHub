@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { Tool } from "./types.js";
-import { git } from "../git.js";
+import type { Tool } from "./types";
+import { git } from "../git";
 
 const Input = z.object({
   max_entries: z.number().int().positive().max(2000).default(500),

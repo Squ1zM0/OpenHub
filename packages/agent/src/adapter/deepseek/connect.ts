@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { chromium, type Browser, type Page } from "playwright-core";
-import { createBrowserlessSession, stopBrowserlessSession } from "./browserless.js";
-import { discoverSelectors } from "./discovery.js";
-import { encryptCredentials } from "./credentials.js";
+import { createBrowserlessSession, stopBrowserlessSession } from "./browserless";
+import { discoverSelectors } from "./discovery";
+import { encryptCredentials } from "./credentials";
 import type {
   ConnectStore,
   CredentialStore,
   PendingConnect,
-} from "./store.js";
-import type { DeepSeekAdapterConfig, PlaywrightCookie } from "./types.js";
+} from "./store";
+import type { DeepSeekAdapterConfig, PlaywrightCookie } from "./types";
 
 const DEEPSEEK_URL = "https://chat.deepseek.com/";
 const CONNECT_TTL_MS = 10 * 60 * 1000;

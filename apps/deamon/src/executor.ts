@@ -1,6 +1,6 @@
 import type { Job, Result } from "@openhub/protocol";
-import type { Session } from "./session.js";
-import { getTool } from "./tools/registry.js";
+import type { Session } from "./session";
+import { getTool } from "./tools/registry";
 
 export async function execute(session: Session, job: Job): Promise<Result> {
   const started = Date.now();

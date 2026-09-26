@@ -1,6 +1,6 @@
 import type { Page } from "playwright-core";
-import { DEFAULT_SELECTORS } from "./selectors.js";
-import type { DeepSeekSelectors, SelectorCandidates } from "./types.js";
+import { DEFAULT_SELECTORS } from "./selectors";
+import type { DeepSeekSelectors, SelectorCandidates } from "./types";
 
 /**
  * Programmatic selector discovery. Runs after login inside the connect flow's

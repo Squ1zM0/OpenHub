@@ -1,4 +1,4 @@
-import type { StoredCredentials } from "./credentials.js";
+import type { StoredCredentials } from "./credentials";
 
 /**
  * Where encrypted DeepSeek credentials live, keyed by user id.

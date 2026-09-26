@@ -1,9 +1,9 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
-import type { Tool } from "./types.js";
-import { safeResolve } from "./path.js";
-import { checkpoint } from "../snapshot.js";
+import type { Tool } from "./types";
+import { safeResolve } from "./path";
+import { checkpoint } from "../snapshot";
 
 const Input = z.object({
   path: z.string().min(1),

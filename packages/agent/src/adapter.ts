@@ -1,4 +1,4 @@
-import type { Adapter, AdapterResponse, Message, ScriptedResponse } from "./types.js";
+import type { Adapter, AdapterResponse, Message, ScriptedResponse } from "./types";
 
 /**
  * Scripted adapter for exercising the loop without a real model.

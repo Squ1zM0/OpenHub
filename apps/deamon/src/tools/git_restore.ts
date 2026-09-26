@@ -1,7 +1,7 @@
 import { z } from "zod";
-import type { Tool } from "./types.js";
-import { git } from "../git.js";
-import { safeResolve } from "./path.js";
+import type { Tool } from "./types";
+import { git } from "../git";
+import { safeResolve } from "./path";
 import { relative } from "node:path";
 
 const Input = z.object({
