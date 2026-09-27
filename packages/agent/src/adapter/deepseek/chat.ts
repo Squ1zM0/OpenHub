@@ -5,10 +5,10 @@ import { parseToolCalls, type ToolCall } from "../../types";
 import type { DeepSeekSelectors, PlaywrightCookie } from "./types";
 
 const DEEPSEEK_URL = "https://chat.deepseek.com/";
-const SESSION_TTL_MS = 180_000;      // 3 min ceiling
-const POLL_INTERVAL_MS = 250;        // how often to read the DOM
-const STABLE_WINDOW_MS = 1_500;      // text must be unchanged this long
-const RESPONSE_TIMEOUT_MS = 240_000; // 4 min hard cap
+const SESSION_TTL_MS = 180_000;
+const POLL_INTERVAL_MS = 250;
+const STABLE_WINDOW_MS = 1_500;
+const RESPONSE_TIMEOUT_MS = 240_000;
 
 export interface ChatTurnOptions {
   cookies: PlaywrightCookie[];
@@ -29,17 +29,9 @@ export type ChatEvent =
 /**
  * Run one chat turn against DeepSeek.
  *
- * Lifecycle:
- *   1. Fresh Browserless session, TTL 180s.
- *   2. Puppeteer connects, cookies injected, navigate to chat.
- *   3. Verify logged in via the chat input selector.
- *   4. Type the user message, press send.
- *   5. Poll the last assistant message every 250ms, yield deltas.
- *   6. Done when the stop button disappears AND text is stable for 1.5s.
- *   7. Session closed in finally.
- *
- * Yields deltas, not the whole reply — the caller (SSE route) forwards
- * each event to the browser as it's produced.
+ * Opens a fresh Browserless session per turn. Cookie injection restores
+ * the logged-in state, so no session persistence across requests is
+ * needed — the cookies are the persistence.
  */
 export async function* runChatTurn(
   opts: ChatTurnOptions,
@@ -70,22 +62,23 @@ export async function* runChatTurn(
     });
 
     const context = browser.defaultBrowserContext();
-    await context.setCookie(...opts.cookies.map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path ?? "/",
-      expires: c.expires,
-      httpOnly: c.httpOnly,
-      secure: c.secure,
-      sameSite: c.sameSite,
-    })));
+    await context.setCookie(
+      ...opts.cookies.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path ?? "/",
+        expires: c.expires,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+        sameSite: c.sameSite,
+      })),
+    );
 
     const page = (await browser.pages())[0] ?? (await browser.newPage());
     log(`navigating to ${DEEPSEEK_URL}`);
     await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded" });
 
-    // Verify logged in.
     const inputHandle = await waitForSelector(page, selectors.input, 15_000);
     if (!inputHandle) {
       yield {
@@ -98,11 +91,9 @@ export async function* runChatTurn(
 
     yield { type: "session_ready" };
 
-    // Send the user message.
     log("sending message");
     await typeAndSend(page, opts.userMessage, selectors);
 
-    // Poll for the reply.
     log("waiting for reply");
     const beforeCount = await countAssistantMessages(page, selectors);
 
@@ -111,7 +102,6 @@ export async function* runChatTurn(
 
     let lastText = "";
     let stableSince = Date.now();
-    const consumed = 0;
 
     while (Date.now() < deadline) {
       if (opts.signal?.aborted) throw new Error("aborted");
@@ -121,12 +111,9 @@ export async function* runChatTurn(
       const stopVisible = await anyVisible(page, selectors.stopButton);
 
       if (text !== lastText) {
-        // Emit the delta since the last emission.
         if (text.length > lastText.length && text.startsWith(lastText)) {
           yield { type: "message_delta", text: text.slice(lastText.length) };
         } else {
-          // Non-prefix change — emit the whole text as a single delta and
-          // let the client replace. Rare; happens on markdown re-renders.
           yield { type: "message_delta", text };
         }
         lastText = text;
@@ -151,8 +138,6 @@ export async function* runChatTurn(
     }
   }
 }
-
-// ─── Internals ─────────────────────────────────────────────────────────────
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -190,7 +175,6 @@ async function typeAndSend(
   if (!input) throw new Error("chat input not found after navigation");
 
   await input.click();
-  // Clear any prior content.
   await input.evaluate((el) => {
     if (el instanceof HTMLTextAreaElement) {
       el.value = "";
