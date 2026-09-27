@@ -12,8 +12,8 @@
  *
  * Proxy: DeepSeek's CloudFront WAF blocks datacenter IP ranges. Routing
  * through Browserless's built-in proxy presents a different egress IP.
- * Proxy config is read once at session creation and cannot be changed
- * mid-session.
+ * The proxy object on POST /session accepts exactly: type, sticky, country,
+ * city, state, preset. Anything else is rejected with a 400.
  */
 
 export interface BrowserlessSession {
@@ -29,8 +29,12 @@ export interface ProxyConfig {
   sticky?: boolean;
   /** Two-letter country code, e.g. "us". */
   country?: string;
-  /** Match browser locale to the proxy country. */
-  localeMatch?: boolean;
+  /** City name, lowercase, no spaces. Requires a Scale plan. */
+  city?: string;
+  /** State or province name, lowercase, no spaces. Requires a Scale plan. */
+  state?: string;
+  /** Website-specific preset, e.g. "px_gov01". Residential only. */
+  preset?: string;
 }
 
 export interface CreateSessionOptions {
@@ -38,10 +42,6 @@ export interface CreateSessionOptions {
   baseUrl?: string;
   ttlMs?: number;
   stealth?: boolean;
-  /**
-   * Browser engine. "stealth" uses Brave with advanced anti-detection —
-   * worth trying when a plain Chromium session gets blocked.
-   */
   browser?: "chrome" | "chromium" | "stealth";
   proxy?: ProxyConfig;
   debug?: boolean;
@@ -68,12 +68,17 @@ export async function createBrowserlessSession(
   if (opts.browser) body.browser = opts.browser;
 
   if (opts.proxy) {
-    body.proxy = {
+    // Only send keys the schema allows. `localeMatch` is a query parameter,
+    // not a body property — including it here causes a 400.
+    const proxy: Record<string, unknown> = {
       type: opts.proxy.type,
       sticky: opts.proxy.sticky ?? true,
-      ...(opts.proxy.country ? { country: opts.proxy.country } : {}),
-      ...(opts.proxy.localeMatch ? { localeMatch: true } : {}),
     };
+    if (opts.proxy.country) proxy.country = opts.proxy.country;
+    if (opts.proxy.city) proxy.city = opts.proxy.city;
+    if (opts.proxy.state) proxy.state = opts.proxy.state;
+    if (opts.proxy.preset) proxy.preset = opts.proxy.preset;
+    body.proxy = proxy;
   }
 
   const res = await fetch(url, {
