@@ -12,9 +12,11 @@
       "default": "./dist/index.js"
     }
   },
+  "files": ["dist"],
   "dependencies": {
     "@openhub/protocol": "workspace:*",
     "playwright-core": "^1.48.0",
+    "puppeteer-core": "^23.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -23,11 +25,8 @@
     "typescript": "^5.5.0"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "discover-selectors": "tsx scripts/discover-selectors.ts",
-    "build": "tsc -p tsconfig.build.json"
-  },
-  "files": [
-    "dist"
-  ]
+    "discover-selectors": "tsx scripts/discover-selectors.ts"
+  }
 }
