@@ -17,14 +17,19 @@ export const maxDuration = 60;
  * DeepSeek's CloudFront WAF blocks datacenter IPs. The residential proxy
  * is the reliable fix. If your Browserless plan doesn't include it, the
  * session-creation call will fail with a clear error naming the reason.
+ *
+ * The proxy body sent to Browserless accepts only: type, sticky, country,
+ * city, state, preset. Sending extra keys (e.g. localeMatch) returns 400.
  */
 export async function POST(): Promise<Response> {
   const env = readDeepSeekEnv();
   const connectStore = getConnectStore();
 
   const proxyType =
-    (process.env.BROWSERLESS_PROXY_TYPE as "residential" | "datacenter" | undefined) ??
-    "residential";
+    (process.env.BROWSERLESS_PROXY_TYPE as
+      | "residential"
+      | "datacenter"
+      | undefined) ?? "residential";
   const proxyCountry = process.env.BROWSERLESS_PROXY_COUNTRY ?? "us";
   const browser = process.env.BROWSERLESS_BROWSER as
     | "chrome"
@@ -42,7 +47,6 @@ export async function POST(): Promise<Response> {
           type: proxyType,
           sticky: true,
           country: proxyCountry,
-          localeMatch: true,
         },
         browser,
         debug: true,
