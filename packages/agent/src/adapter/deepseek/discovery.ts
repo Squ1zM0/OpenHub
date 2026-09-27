@@ -1,36 +1,32 @@
-import type { Page } from "playwright-core";
-import { DEFAULT_SELECTORS } from "./selectors.js";
-import type { DeepSeekSelectors, SelectorCandidates } from "./types.js";
+import type { Page } from "puppeteer-core";
+import { DEFAULT_SELECTORS } from "./selectors";
+import type { DeepSeekSelectors, SelectorCandidates } from "./types";
 
 /**
- * Programmatic selector discovery. Runs after login inside the connect flow's
- * browser session — the same page the user just authenticated on. Returns a
- * best-effort set of selectors for the current UI.
+ * Programmatic selector discovery. Runs after login inside the connect
+ * flow's browser session. Returns a best-effort set of selectors for the
+ * current UI.
+ *
+ * Uses Puppeteer's Page API, not Playwright's. The two are not
+ * interchangeable — Puppeteer has `page.$$()`, `element.boundingBox()`,
+ * and `element.evaluate()` where Playwright has `page.locator()`,
+ * `.isVisible()`, and `.evaluate()` on the locator itself.
  *
  * What we can verify at connect time (chat is empty, nothing generating):
- *   - input: yes, it's on the page
- *   - send button: yes, it's next to the input
- *   - logged-in indicator: yes, same as input
+ *   - input: yes
+ *   - send button: yes
+ *   - logged-in indicator: yes
  *
- * What we cannot verify at connect time:
- *   - stop button: only renders while generating
- *   - assistant message container: no message exists yet
- *
- * For those we keep the defaults, and tag the result as "partially verified."
- * The adapter re-probes on first real use — if stop or message selectors miss,
- * it logs a warning and the user re-connects.
+ * What we cannot:
+ *   - stop button (only renders while generating)
+ *   - assistant message container (no message exists yet)
+ *   - new chat button (may or may not be present)
  */
 export interface DiscoveryResult {
   selectors: DeepSeekSelectors;
   verified: ("input" | "sendButton" | "loggedInIndicator")[];
   unverified: ("stopButton" | "assistantMessage" | "newChatButton")[];
-  /** Everything we saw, for logging. */
   probe: Record<string, { found: boolean; selector?: string; count?: number }>;
-}
-
-interface Probe {
-  candidates: SelectorCandidates;
-  mustBeVisible?: boolean;
 }
 
 async function tryCandidates(
@@ -40,14 +36,13 @@ async function tryCandidates(
 ): Promise<{ selector: string; count: number } | null> {
   for (const sel of candidates) {
     try {
-      const loc = page.locator(sel);
-      const count = await loc.count();
-      if (count === 0) continue;
+      const elements = await page.$$(sel);
+      if (elements.length === 0) continue;
       if (mustBeVisible) {
-        const visible = await loc.first().isVisible({ timeout: 300 });
-        if (!visible) continue;
+        const box = await elements[0]!.boundingBox();
+        if (!box || box.width === 0 || box.height === 0) continue;
       }
-      return { selector: sel, count };
+      return { selector: sel, count: elements.length };
     } catch {
       // try next
     }
@@ -55,11 +50,6 @@ async function tryCandidates(
   return null;
 }
 
-/**
- * Rank a set of candidate selectors by specificity. More specific = fewer
- * matches and more attributes. `textarea#chat-input` beats bare `textarea`.
- * Used to surface new selectors we haven't seen before.
- */
 function specificity(sel: string): number {
   let score = 0;
   if (sel.includes("#")) score += 4;
@@ -71,9 +61,9 @@ function specificity(sel: string): number {
 }
 
 /**
- * Discover input + send button by walking the DOM around any textarea or
- * contenteditable. This catches UI that uses obfuscated classes our defaults
- * don't know about.
+ * Walk the DOM for textareas, contenteditables, and send-like buttons.
+ * Runs inside the browser, so it uses DOM APIs only — identical in
+ * Puppeteer and Playwright at this layer.
  */
 async function deepProbe(page: Page): Promise<{
   inputs: string[];
@@ -132,13 +122,11 @@ async function deepProbe(page: Page): Promise<{
 export async function discoverSelectors(page: Page): Promise<DiscoveryResult> {
   const probe: DiscoveryResult["probe"] = {};
 
-  // Start with defaults, then augment with anything specific we find.
   const inputCandidates: string[] = [];
   const sendCandidates: string[] = [];
 
   const deep = await deepProbe(page);
 
-  // Prefer the most specific selectors the DOM actually carries.
   const rankedInputs = [...deep.inputs].sort(
     (a, b) => specificity(b) - specificity(a),
   );
@@ -159,13 +147,10 @@ export async function discoverSelectors(page: Page): Promise<DiscoveryResult> {
     ? { found: true, selector: sendHit.selector, count: sendHit.count }
     : { found: false };
 
-  // Logged-in indicator: same candidates as input, since the input only
-  // renders when authenticated.
   probe.loggedInIndicator = inputHit
     ? { found: true, selector: inputHit.selector, count: inputHit.count }
     : { found: false };
 
-  // Prefer specific selectors we found over the generic defaults.
   const input: SelectorCandidates = inputHit
     ? dedupe([inputHit.selector, ...rankedInputs, ...DEFAULT_SELECTORS.input])
     : DEFAULT_SELECTORS.input;
@@ -177,7 +162,6 @@ export async function discoverSelectors(page: Page): Promise<DiscoveryResult> {
   const selectors: DeepSeekSelectors = {
     input,
     sendButton,
-    // Kept from defaults — cannot be probed on an empty chat.
     stopButton: DEFAULT_SELECTORS.stopButton,
     assistantMessage: DEFAULT_SELECTORS.assistantMessage,
     newChatButton: DEFAULT_SELECTORS.newChatButton,
