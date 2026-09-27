@@ -1,10 +1,10 @@
-import { InMemoryChatStore, type ChatStore } from "./chat-store";
+import { InMemoryStore, type SessionStore } from "./store";
 
-const g = globalThis as unknown as { __openhub_chats?: ChatStore };
+const g = globalThis as unknown as { __openhub_store?: SessionStore };
 
-export function getChatStore(): ChatStore {
-  if (!g.__openhub_chats) {
-    g.__openhub_chats = new InMemoryChatStore();
+export function getStore(): SessionStore {
+  if (!g.__openhub_store) {
+    g.__openhub_store = new InMemoryStore();
   }
-  return g.__openhub_chats;
+  return g.__openhub_store;
 }
