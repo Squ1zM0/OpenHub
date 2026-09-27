@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
-import { createBrowserlessSession, stopBrowserlessSession } from "./browserless";
+import {
+  createBrowserlessSession,
+  stopBrowserlessSession,
+  type ProxyConfig,
+} from "./browserless";
 import { discoverSelectors } from "./discovery";
 import { encryptCredentials } from "./credentials";
 import type { ConnectStore, CredentialStore, PendingConnect } from "./store";
@@ -15,6 +19,16 @@ export interface ConnectConfig {
   browserlessUrl: string;
   credentialKeyHex: string;
   sessionTtlMs?: number;
+  /**
+   * Route the browser's traffic through Browserless's built-in proxy.
+   * Required for DeepSeek — its CloudFront WAF blocks datacenter IPs.
+   * Fixed at session creation; cannot change mid-session.
+   */
+  proxy?: ProxyConfig;
+  /**
+   * Browser engine. "stealth" runs Brave with anti-detection patches.
+   */
+  browser?: "chrome" | "chromium" | "stealth";
   debug?: boolean;
 }
 
@@ -30,15 +44,19 @@ export async function startConnect(
   userId: string,
 ): Promise<StartConnectResult> {
   const ttl = Math.min(cfg.sessionTtlMs ?? MAX_SESSION_MS, MAX_SESSION_MS);
+
   const session = await createBrowserlessSession({
     token: cfg.browserlessToken,
     baseUrl: cfg.browserlessUrl,
     ttlMs: ttl,
     stealth: true,
+    browser: cfg.browser,
+    proxy: cfg.proxy,
     debug: cfg.debug,
   });
 
   let browser: Browser | null = null;
+
   try {
     browser = await puppeteer.connect({
       browserWSEndpoint: session.connectUrl,
@@ -49,10 +67,11 @@ export async function startConnect(
 
     const liveUrl = await mintLiveUrl(page, ttl, cfg.debug);
 
-    // Flag the browser as reconnectable, then disconnect. Puppeteer's
-    // disconnect() detaches without terminating — the browser stays alive
-    // server-side for `ttl` ms. Playwright cannot do this.
+    // Disconnect (not close) — detaches the CDP client without terminating
+    // the browser session. Playwright lacks this method; Puppeteer has it.
+    // The session stays alive server-side for `ttl` ms.
     await browser.disconnect();
+    browser = null;
 
     const connectId = randomUUID();
     const pending: PendingConnect = {
@@ -67,7 +86,12 @@ export async function startConnect(
     };
     await connectStore.put(pending, ttl);
 
-    if (cfg.debug) console.log(`[deepseek.connect] started ${connectId}`);
+    if (cfg.debug) {
+      console.log(
+        `[deepseek.connect] started ${connectId} session=${session.id} ttl=${ttl}ms`,
+      );
+    }
+
     return { connectId, liveUrl, expiresAt: pending.expires_at };
   } catch (e) {
     if (browser) await browser.close().catch(() => {});
@@ -76,8 +100,13 @@ export async function startConnect(
   }
 }
 
-async function mintLiveUrl(page: Page, timeoutMs: number, debug?: boolean): Promise<string> {
+async function mintLiveUrl(
+  page: Page,
+  timeoutMs: number,
+  debug?: boolean,
+): Promise<string> {
   const cdp = await page.createCDPSession();
+
   const result = (await cdp.send("Browserless.liveURL" as never, {
     timeout: Math.min(timeoutMs, MAX_SESSION_MS),
     interactable: true,
@@ -86,9 +115,20 @@ async function mintLiveUrl(page: Page, timeoutMs: number, debug?: boolean): Prom
     quality: 70,
   } as never)) as { liveURL?: string; error?: string | null };
 
-  if (result.error) throw new Error(`browserless liveURL failed: ${result.error}`);
-  if (!result.liveURL) throw new Error("browserless liveURL returned no URL");
-  if (debug) console.log(`[deepseek.connect] live URL minted`);
+  if (result.error) {
+    throw new Error(`browserless liveURL failed: ${result.error}`);
+  }
+  if (!result.liveURL) {
+    throw new Error(
+      "browserless liveURL returned no URL. Check that your plan supports " +
+        "live view and that the token is valid.",
+    );
+  }
+
+  if (debug) {
+    console.log(`[deepseek.connect] live URL minted`);
+  }
+
   return result.liveURL;
 }
 
@@ -107,6 +147,7 @@ export async function pollConnect(
 ): Promise<ConnectStatus> {
   const pending = await connectStore.get(connectId);
   if (!pending) return { status: "not_found" };
+
   if (pending.expires_at < Date.now()) {
     await stopBrowserlessSession(pending.stop_url, cfg.debug);
     await connectStore.delete(connectId);
@@ -114,6 +155,7 @@ export async function pollConnect(
   }
 
   let browser: Browser | null = null;
+
   try {
     browser = await puppeteer.connect({
       browserWSEndpoint: pending.connect_url,
@@ -127,17 +169,26 @@ export async function pollConnect(
     }
 
     const loggedIn = await detectLoggedIn(page);
+
     const remaining = pending.expires_at - Date.now();
     let liveUrl = pending.live_url;
     if (!loggedIn && remaining < LIVE_URL_REFRESH_WINDOW_MS) {
       try {
         liveUrl = await mintLiveUrl(page, MAX_SESSION_MS, cfg.debug);
-      } catch { /* old URL keeps working */ }
+      } catch {
+        // Old URL keeps working until it expires.
+      }
     }
 
     if (!loggedIn) {
       await browser.disconnect();
-      return { status: "pending", liveUrl, expiresAt: pending.expires_at, message: "Waiting for login..." };
+      browser = null;
+      return {
+        status: "pending",
+        liveUrl,
+        expiresAt: pending.expires_at,
+        message: "Waiting for login...",
+      };
     }
 
     const cookies = await page.cookies();
@@ -145,10 +196,14 @@ export async function pollConnect(
     const discovery = await discoverSelectors(page);
 
     const stored = encryptCredentials(
-      { cookies: cookies as unknown as PlaywrightCookie[], selectors: discovery.selectors },
+      {
+        cookies: cookies as unknown as PlaywrightCookie[],
+        selectors: discovery.selectors,
+      },
       cfg.credentialKeyHex,
     );
     if (accountHint) stored.account_hint = accountHint;
+
     await credentialStore.put(pending.user_id, stored);
 
     await browser.close();
@@ -156,7 +211,13 @@ export async function pollConnect(
     await stopBrowserlessSession(pending.stop_url, cfg.debug);
     await connectStore.delete(connectId);
 
-    if (cfg.debug) console.log(`[deepseek.connect] ${connectId} connected`);
+    if (cfg.debug) {
+      console.log(
+        `[deepseek.connect] ${connectId} connected user=${pending.user_id} ` +
+          `verified=[${discovery.verified.join(",")}]`,
+      );
+    }
+
     return { status: "connected", accountHint, verified: discovery.verified };
   } catch (e) {
     if (browser) await browser.close().catch(() => {});
@@ -181,12 +242,21 @@ export async function cancelConnect(
 async function detectLoggedIn(page: Page): Promise<boolean> {
   const url = page.url();
   if (url.includes("/sign_in") || url.includes("/login")) return false;
-  const candidates = ["textarea", "div[contenteditable='true']", "[role='textbox']"];
+
+  const candidates = [
+    "textarea",
+    "div[contenteditable='true']",
+    "[role='textbox']",
+  ];
   for (const sel of candidates) {
     try {
       const el = await page.$(sel);
-      if (el && await el.isIntersectingViewport()) return true;
-    } catch { /* try next */ }
+      if (!el) continue;
+      const box = await el.boundingBox();
+      if (box && box.width > 0 && box.height > 0) return true;
+    } catch {
+      // try next
+    }
   }
   return false;
 }
@@ -200,11 +270,12 @@ async function scrapeAccountHint(page: Page): Promise<string | undefined> {
   for (const sel of candidates) {
     try {
       const el = await page.$(sel);
-      if (el) {
-        const label = await el.evaluate((n) => n.getAttribute("aria-label"));
-        if (label && label.length < 120) return label;
-      }
-    } catch { /* try next */ }
+      if (!el) continue;
+      const label = await el.evaluate((n) => n.getAttribute("aria-label"));
+      if (label && label.length < 120) return label;
+    } catch {
+      // try next
+    }
   }
   return undefined;
 }
