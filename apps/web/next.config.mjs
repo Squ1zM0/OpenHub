@@ -12,10 +12,11 @@ export default {
   // to `.ts` files across a pnpm symlink boundary. That boundary is where
   // resolution breaks, and it isn't something this config can influence.
 
-  // Playwright uses dynamic requires and optional native deps. Bundling it
-  // breaks. Leave it as a runtime require resolved from node_modules.
-  // Requires playwright-core to also be a direct dependency of apps/web
-  // (see apps/web/package.json) — otherwise it lives in the pnpm store and
-  // isn't resolvable from the app directory.
-  serverExternalPackages: ["playwright-core"],
+  // Browser driver packages use dynamic requires and optional native deps.
+  // Bundling them breaks. Leave them as runtime requires resolved from
+  // node_modules.
+  //
+  // Both must also be direct dependencies of apps/web — otherwise they live
+  // in the pnpm store and aren't resolvable from the app directory.
+  serverExternalPackages: ["playwright-core", "puppeteer-core"],
 };
