@@ -11,7 +11,13 @@ import type { ConnectStore, CredentialStore, PendingConnect } from "./store";
 import type { DeepSeekAdapterConfig, PlaywrightCookie } from "./types";
 
 const DEEPSEEK_URL = "https://chat.deepseek.com/";
-const MAX_SESSION_MS = 120_000;
+/**
+ * 180s is the ceiling Browserless advertises in their onboarding email.
+ * Free-tier sessions were previously capped at 120s; if 180 gets rejected
+ * with a plan-limit error, the create call will say so and you can lower
+ * this back. Mobile OAuth through the live view needs the headroom.
+ */
+const MAX_SESSION_MS = 180_000;
 const LIVE_URL_REFRESH_WINDOW_MS = 30_000;
 
 export interface ConnectConfig {
@@ -76,6 +82,11 @@ export async function startConnect(
     const page = (await browser.pages())[0] ?? (await browser.newPage());
     await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded" });
 
+    // DeepSeek's login page shows a cookie consent modal that blocks the
+    // username field. Click through it before handing the view to the user.
+    await dismissCookieBanner(page, cfg.debug);
+    await new Promise((r) => setTimeout(r, 1000));
+
     const liveUrl = await mintLiveUrl(page, ttl, cfg.debug);
 
     // Disconnect, don't close — the session must survive for the poll
@@ -135,6 +146,43 @@ async function mintLiveUrl(
   }
   if (debug) console.log(`[deepseek.connect] live URL minted`);
   return result.liveURL;
+}
+
+/**
+ * DeepSeek's login page shows a cookie consent modal that blocks the
+ * username field. Click "Accept all" if present. Best-effort — if the
+ * banner isn't there (e.g. on a return visit), do nothing.
+ */
+async function dismissCookieBanner(page: Page, debug?: boolean): Promise<void> {
+  const candidates = [
+    // Puppeteer text pseudo-class — most robust when supported.
+    "button::-p-text(Accept all)",
+    "button::-p-text(Accept All)",
+    "button::-p-text(Accept all cookies)",
+    "button::-p-text(Necessary cookies only)",
+    // XPath fallbacks — work regardless of Puppeteer version.
+    "xpath///button[contains(., 'Accept all')]",
+    "xpath///button[contains(., 'Necessary cookies')]",
+    // Generic structural patterns.
+    "[data-testid*='cookie' i] button",
+    "[class*='cookie' i] button[class*='accept' i]",
+    "[class*='consent' i] button",
+    "button[aria-label*='Accept' i]",
+  ];
+
+  for (const sel of candidates) {
+    try {
+      const el = await page.$(sel);
+      if (!el) continue;
+      const box = await el.boundingBox();
+      if (!box || box.width === 0) continue;
+      await el.click();
+      if (debug) console.log(`[deepseek.connect] dismissed cookie banner`);
+      return;
+    } catch {
+      // try next
+    }
+  }
 }
 
 export type ConnectStatus =
