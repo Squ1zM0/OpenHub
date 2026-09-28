@@ -1,3 +1,5 @@
+import type { LiveBrowserlessSession } from "@openhub/agent";
+
 /**
  * Process-wide registry of live Browserless sessions, keyed by user.
  *
@@ -6,20 +8,11 @@
  * across cold starts. That's acceptable: the worst case is a cold start,
  * which falls back to creating a fresh session. Cookies restore the
  * logged-in state either way.
- *
- * Production upgrade: back this with Vercel KV, keyed by userId, with
- * the connectUrl encrypted at rest (it contains the session token).
  */
-export interface LiveSession {
-  connectUrl: string;
-  stopUrl: string;
-  expiresAt: number;
-}
-
 class SessionRegistry {
-  private map = new Map<string, LiveSession>();
+  private map = new Map<string, LiveBrowserlessSession>();
 
-  get(userId: string): LiveSession | null {
+  get(userId: string): LiveBrowserlessSession | null {
     const s = this.map.get(userId);
     if (!s) return null;
     // Treat as expired 10s before the actual TTL, so we never hand a
@@ -31,7 +24,7 @@ class SessionRegistry {
     return s;
   }
 
-  set(userId: string, s: LiveSession): void {
+  set(userId: string, s: LiveBrowserlessSession): void {
     this.map.set(userId, s);
   }
 
