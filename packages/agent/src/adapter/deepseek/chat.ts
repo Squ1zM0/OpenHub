@@ -11,6 +11,17 @@ const STABLE_WINDOW_MS = 1_500;
 const RESPONSE_TIMEOUT_MS = 240_000;
 const REUSE_PROBE_MS = 4_000;
 
+/**
+ * A live Browserless session. The connect URL is a WebSocket endpoint; the
+ * stop URL is a REST endpoint for explicit teardown. Callers persist these
+ * across turns to avoid the 3–5s cold start on every message.
+ */
+export interface LiveBrowserlessSession {
+  connectUrl: string;
+  stopUrl: string;
+  expiresAt: number;
+}
+
 export interface ChatTurnOptions {
   cookies: PlaywrightCookie[];
   selectors: Partial<DeepSeekSelectors>;
@@ -18,15 +29,13 @@ export interface ChatTurnOptions {
   browserlessUrl?: string;
   userMessage: string;
   /**
-   * If a live Browserless session URL is provided, we attempt to reuse it
-   * instead of creating a fresh session. Cookies, localStorage, and page
-   * state carry over, which skips the 3–5s cold start and preserves
-   * DeepSeek's client-side chat history.
+   * The live session from the previous turn, if any. If omitted (or if the
+   * reuse attempt fails), a fresh session is created and its details are
+   * returned in the `session_ready` event.
    */
-  existingSessionUrl?: string | null;
+  existingSession?: LiveBrowserlessSession | null;
   /**
    * Extend the session's TTL on each turn so it doesn't expire mid-thread.
-   * Uses the Browserless.reconnect CDP command.
    */
   extendOnUse?: boolean;
   signal?: AbortSignal;
@@ -38,12 +47,8 @@ export type ChatEvent =
       type: "session_ready";
       /** Whether we reused an existing session or created a new one. */
       reused: boolean;
-      /** The WebSocket URL of the session, for the caller to cache. */
-      session_url: string;
-      /** The stop URL, for explicit teardown if needed. */
-      stop_url: string;
-      /** Unix ms when the session TTL expires. */
-      expires_at: number;
+      /** Full session record for the caller to persist and pass back next turn. */
+      session: LiveBrowserlessSession;
     }
   | { type: "message_delta"; text: string }
   | { type: "message_done"; text: string; toolCalls: ToolCall[] }
@@ -59,17 +64,15 @@ export async function* runChatTurn(
   };
 
   let browser: Browser | null = null;
-  let sessionUrl: string;
-  let stopUrl: string;
-  let expiresAt: number;
+  let session: LiveBrowserlessSession | null = null;
   let reused = false;
 
-  // ── 1. Try to reuse an existing session ────────────────────────────────
-  if (opts.existingSessionUrl) {
+  // ── 1. Try to reuse the existing session ──────────────────────────────
+  if (opts.existingSession) {
     log("attempting to reuse existing session");
     try {
       browser = await puppeteer.connect({
-        browserWSEndpoint: opts.existingSessionUrl,
+        browserWSEndpoint: opts.existingSession.connectUrl,
         defaultViewport: { width: 1280, height: 900 },
       });
       const page = await pickDeepSeekPage(browser);
@@ -78,10 +81,8 @@ export async function* runChatTurn(
       const ok = await probeLoggedIn(page, selectors, REUSE_PROBE_MS);
       if (!ok) throw new Error("reused session is not logged in");
 
-      sessionUrl = opts.existingSessionUrl;
-      stopUrl = "";
-      expiresAt = Date.now() + SESSION_TTL_MS;
-      reused = true;
+      // Inherit everything from the existing record first, then extend TTL.
+      session = { ...opts.existingSession };
 
       if (opts.extendOnUse) {
         try {
@@ -89,37 +90,43 @@ export async function* runChatTurn(
           await cdp.send("Browserless.reconnect" as never, {
             timeout: SESSION_TTL_MS,
           } as never);
-          expiresAt = Date.now() + SESSION_TTL_MS;
+          session = { ...session, expiresAt: Date.now() + SESSION_TTL_MS };
           log("session TTL extended via Browserless.reconnect");
         } catch (e) {
-          // Not fatal — we'll fall back to creating a fresh session next
-          // turn if the old one expires.
+          // Not fatal. The session keeps its original expiry; next turn
+          // will fall back to a fresh session if it has died.
           log(`reconnect command failed: ${(e as Error).message}`);
         }
       }
+
+      reused = true;
     } catch (e) {
       log(`reuse failed: ${(e as Error).message} — creating fresh session`);
       if (browser) await browser.close().catch(() => {});
       browser = null;
+      session = null;
     }
   }
 
-  // ── 2. Otherwise, create a fresh session ───────────────────────────────
-  if (!browser) {
+  // ── 2. Otherwise, create a fresh session ──────────────────────────────
+  if (!browser || !session) {
     log("creating fresh browserless session");
-    const session = await createBrowserlessSession({
+    const created = await createBrowserlessSession({
       token: opts.browserlessToken,
       baseUrl: opts.browserlessUrl,
       ttlMs: SESSION_TTL_MS,
       stealth: true,
       debug,
     });
-    sessionUrl = session.connectUrl;
-    stopUrl = session.stopUrl;
-    expiresAt = Date.now() + SESSION_TTL_MS;
+
+    session = {
+      connectUrl: created.connectUrl,
+      stopUrl: created.stopUrl,
+      expiresAt: Date.now() + SESSION_TTL_MS,
+    };
 
     browser = await puppeteer.connect({
-      browserWSEndpoint: session.connectUrl,
+      browserWSEndpoint: created.connectUrl,
       defaultViewport: { width: 1280, height: 900 },
     });
 
@@ -154,15 +161,13 @@ export async function* runChatTurn(
 
   // ── 3. Run the turn ────────────────────────────────────────────────────
   try {
-    const page = await pickDeepSeekPage(browser!);
+    const page = await pickDeepSeekPage(browser);
     if (!page) throw new Error("no DeepSeek page after session setup");
 
     yield {
       type: "session_ready",
       reused,
-      session_url: sessionUrl,
-      stop_url: stopUrl,
-      expires_at: expiresAt,
+      session,
     };
 
     log(`sending message (reused=${reused})`);
@@ -222,8 +227,6 @@ async function pickDeepSeekPage(browser: Browser): Promise<Page | null> {
   const pages = await browser.pages();
   const chat = pages.find((p) => p.url().startsWith(DEEPSEEK_URL));
   if (chat) return chat;
-  // If no page is on DeepSeek but we have a page, use it (fresh session
-  // before navigation).
   return pages[0] ?? null;
 }
 
