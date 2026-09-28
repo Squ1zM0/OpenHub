@@ -9,6 +9,7 @@ import {
 } from "@openhub/agent";
 import { getCredentialStore } from "@/src/lib/credential-store";
 import { getChatStore } from "@/src/lib/chat-store-singleton";
+import { getSessionRegistry } from "@/src/lib/session-registry";
 import { sendJob } from "@/src/lib/tasks";
 
 export const runtime = "nodejs";
@@ -67,6 +68,7 @@ export async function POST(req: Request): Promise<Response> {
 
   const creds = decryptCredentials(storedCreds, env.DEEPSEEK_CREDENTIAL_KEY);
   const chatStore = getChatStore();
+  const sessionRegistry = getSessionRegistry();
 
   await chatStore.appendMessage(userId, session_id, {
     id: randomUUID(),
@@ -100,6 +102,10 @@ export async function POST(req: Request): Promise<Response> {
         for (let turn = 1; turn <= max_turns; turn++) {
           send({ type: "turn_start", turn });
 
+          // Reuse the live Browserless session if we have one. First turn
+          // pays the cold-start cost; every subsequent turn is warm.
+          const existing = sessionRegistry.get(userId);
+
           let assistantText = "";
           let toolCalls: ToolCall[] = [];
           let turnError: string | null = null;
@@ -110,11 +116,18 @@ export async function POST(req: Request): Promise<Response> {
             browserlessToken: env.BROWSERLESS_TOKEN,
             browserlessUrl: env.BROWSERLESS_URL,
             userMessage: currentPrompt,
+            existingSessionUrl: existing?.connectUrl ?? null,
+            extendOnUse: true,
             debug: true,
           })) {
             switch (evt.type) {
               case "session_ready":
-                send({ type: "session_ready" });
+                sessionRegistry.set(userId, {
+                  connectUrl: evt.session_url,
+                  stopUrl: evt.stop_url,
+                  expiresAt: evt.expires_at,
+                });
+                send({ type: "session_ready", reused: evt.reused });
                 break;
               case "message_delta":
                 send({ type: "message_delta", text: evt.text });
@@ -151,8 +164,6 @@ export async function POST(req: Request): Promise<Response> {
             return;
           }
 
-          // Execute each tool call serially. Serial because the daemon
-          // dispatches one job at a time per session anyway.
           const results: ToolExecResult[] = [];
           for (const call of toolCalls) {
             send({ type: "tool_call_start", call });
@@ -215,8 +226,6 @@ export async function POST(req: Request): Promise<Response> {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
-      // Vercel-specific: disable response buffering so events flush
-      // immediately instead of at function exit.
       "x-accel-buffering": "no",
     },
   });
