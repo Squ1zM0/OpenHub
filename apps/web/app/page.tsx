@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 
 interface TaskResponse {
   status: string;
@@ -109,17 +110,37 @@ export default function Home() {
   }
 
   return (
-    <main style={{ padding: 32, maxWidth: 800, margin: "0 auto" }}>
+    <main style={{ padding: 24, maxWidth: 800, margin: "0 auto" }}>
       <h1 style={{ marginBottom: 4 }}>OpenHub</h1>
       <p style={{ color: "#666", marginTop: 0 }}>
         Control plane. The daemon runs on your machine and polls this server.
       </p>
 
-      <section style={{ marginTop: 24, padding: 16, background: "#f7f7f7", borderRadius: 6 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <section
+        style={{
+          marginTop: 24,
+          padding: 16,
+          background: "#f7f7f7",
+          borderRadius: 6,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
           <div>
             <strong>DeepSeek</strong>
-            <span style={{ marginLeft: 12, color: ds?.connected ? "#080" : "#a00" }}>
+            <span
+              style={{
+                marginLeft: 12,
+                color: ds?.connected ? "#080" : "#a00",
+              }}
+            >
               {ds === null
                 ? "checking…"
                 : ds.connected
@@ -130,17 +151,41 @@ export default function Home() {
           <div>
             {ds?.connected ? (
               <>
-                <a href="/connect/deepseek" style={{ marginRight: 12 }}>
+                <Link href="/connect/deepseek" style={{ marginRight: 12 }}>
                   Reconnect
-                </a>
+                </Link>
                 <button onClick={disconnectDeepSeek}>Disconnect</button>
               </>
             ) : (
-              <a href="/connect/deepseek">Connect DeepSeek →</a>
+              <Link href="/connect/deepseek">Connect DeepSeek →</Link>
             )}
           </div>
         </div>
       </section>
+
+      {ds?.connected && (
+        <section style={{ marginTop: 20 }}>
+          <Link
+            href="/chat"
+            style={{
+              display: "block",
+              padding: "20px 24px",
+              background: "#111",
+              color: "#fff",
+              borderRadius: 8,
+              textDecoration: "none",
+              textAlign: "center",
+              fontSize: 18,
+              fontWeight: 600,
+            }}
+          >
+            Open Chat →
+          </Link>
+          <p style={{ color: "#666", fontSize: 13, textAlign: "center", marginTop: 8 }}>
+            Chat with DeepSeek. Tool calls run on your daemon and stream back in.
+          </p>
+        </section>
+      )}
 
       <section style={{ marginTop: 32 }}>
         <button onClick={createSession} disabled={busy}>
@@ -169,7 +214,9 @@ export default function Home() {
                 adapter:{" "}
                 <select
                   value={adapter}
-                  onChange={(e) => setAdapter(e.target.value as "scripted" | "deepseek")}
+                  onChange={(e) =>
+                    setAdapter(e.target.value as "scripted" | "deepseek")
+                  }
                 >
                   <option value="scripted">scripted</option>
                   <option value="deepseek" disabled={!ds?.connected}>
@@ -206,7 +253,14 @@ export default function Home() {
                 {taskOutput.final_message && (
                   <p style={{ marginTop: 8 }}>{taskOutput.final_message}</p>
                 )}
-                <pre style={{ ...box, marginTop: 12, maxHeight: 400, overflow: "auto" }}>
+                <pre
+                  style={{
+                    ...box,
+                    marginTop: 12,
+                    maxHeight: 400,
+                    overflow: "auto",
+                  }}
+                >
                   {taskOutput.events.map((e) => JSON.stringify(e)).join("\n")}
                 </pre>
               </>
