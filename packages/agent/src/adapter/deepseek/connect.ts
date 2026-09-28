@@ -3,7 +3,6 @@ import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import {
   createBrowserlessSession,
   stopBrowserlessSession,
-  type ProxyConfig,
 } from "./browserless";
 import { discoverSelectors } from "./discovery";
 import { encryptCredentials } from "./credentials";
@@ -19,16 +18,6 @@ export interface ConnectConfig {
   browserlessUrl: string;
   credentialKeyHex: string;
   sessionTtlMs?: number;
-  /**
-   * Route the browser's traffic through Browserless's built-in proxy.
-   * Required for DeepSeek — its CloudFront WAF blocks datacenter IPs.
-   * Fixed at session creation; cannot change mid-session.
-   */
-  proxy?: ProxyConfig;
-  /**
-   * Browser engine. "stealth" runs Brave with anti-detection patches.
-   */
-  browser?: "chrome" | "chromium" | "stealth";
   debug?: boolean;
 }
 
@@ -38,38 +27,45 @@ export interface StartConnectResult {
   expiresAt: number;
 }
 
+/**
+ * Find the page hosting DeepSeek. During OAuth, the popup is a separate
+ * page — we must skip it and pick the chat tab.
+ */
+async function pickDeepSeekPage(browser: Browser): Promise<Page | null> {
+  const pages = await browser.pages();
+  const chat = pages.find((p) => p.url().startsWith(DEEPSEEK_URL));
+  if (chat) return chat;
+  // If nothing is on DeepSeek yet (fresh session before navigation),
+  // fall back to the first page so the caller can navigate it.
+  return pages[0] ?? null;
+}
+
 export async function startConnect(
   cfg: ConnectConfig,
   connectStore: ConnectStore,
   userId: string,
 ): Promise<StartConnectResult> {
   const ttl = Math.min(cfg.sessionTtlMs ?? MAX_SESSION_MS, MAX_SESSION_MS);
-
   const session = await createBrowserlessSession({
     token: cfg.browserlessToken,
     baseUrl: cfg.browserlessUrl,
     ttlMs: ttl,
     stealth: true,
-    browser: cfg.browser,
-    proxy: cfg.proxy,
     debug: cfg.debug,
   });
 
   let browser: Browser | null = null;
-
   try {
     browser = await puppeteer.connect({
       browserWSEndpoint: session.connectUrl,
       defaultViewport: null,
     });
+
     const page = (await browser.pages())[0] ?? (await browser.newPage());
     await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded" });
 
     const liveUrl = await mintLiveUrl(page, ttl, cfg.debug);
 
-    // Disconnect (not close) — detaches the CDP client without terminating
-    // the browser session. Playwright lacks this method; Puppeteer has it.
-    // The session stays alive server-side for `ttl` ms.
     await browser.disconnect();
     browser = null;
 
@@ -106,7 +102,6 @@ async function mintLiveUrl(
   debug?: boolean,
 ): Promise<string> {
   const cdp = await page.createCDPSession();
-
   const result = (await cdp.send("Browserless.liveURL" as never, {
     timeout: Math.min(timeoutMs, MAX_SESSION_MS),
     interactable: true,
@@ -124,11 +119,7 @@ async function mintLiveUrl(
         "live view and that the token is valid.",
     );
   }
-
-  if (debug) {
-    console.log(`[deepseek.connect] live URL minted`);
-  }
-
+  if (debug) console.log(`[deepseek.connect] live URL minted`);
   return result.liveURL;
 }
 
@@ -161,15 +152,39 @@ export async function pollConnect(
       browserWSEndpoint: pending.connect_url,
       defaultViewport: null,
     });
-    const page = (await browser.pages())[0] ?? (await browser.newPage());
 
+    // Skip any OAuth popup — pick the chat page by URL.
+    let page = await pickDeepSeekPage(browser);
+    if (!page) {
+      await browser.disconnect();
+      browser = null;
+      return {
+        status: "pending",
+        liveUrl: pending.live_url,
+        expiresAt: pending.expires_at,
+        message: "Waiting for login...",
+      };
+    }
+
+    // If we got a non-DeepSeek page (shouldn't happen after startConnect
+    // navigated), navigate it.
     if (!page.url().startsWith(DEEPSEEK_URL)) {
       await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded" });
       await new Promise((r) => setTimeout(r, 1500));
+      page = await pickDeepSeekPage(browser);
+      if (!page) {
+        await browser.disconnect();
+        browser = null;
+        return {
+          status: "pending",
+          liveUrl: pending.live_url,
+          expiresAt: pending.expires_at,
+          message: "Waiting for login...",
+        };
+      }
     }
 
     const loggedIn = await detectLoggedIn(page);
-
     const remaining = pending.expires_at - Date.now();
     let liveUrl = pending.live_url;
     if (!loggedIn && remaining < LIVE_URL_REFRESH_WINDOW_MS) {
@@ -191,7 +206,10 @@ export async function pollConnect(
       };
     }
 
-    const cookies = await page.cookies();
+    // Capture cookies from the browser context (not the page — DeepSeek
+    // may set cookies on different subdomains).
+    const context = browser.defaultBrowserContext();
+    const cookies = await context.cookies();
     const accountHint = await scrapeAccountHint(page).catch(() => undefined);
     const discovery = await discoverSelectors(page);
 
@@ -203,7 +221,6 @@ export async function pollConnect(
       cfg.credentialKeyHex,
     );
     if (accountHint) stored.account_hint = accountHint;
-
     await credentialStore.put(pending.user_id, stored);
 
     await browser.close();
@@ -242,6 +259,7 @@ export async function cancelConnect(
 async function detectLoggedIn(page: Page): Promise<boolean> {
   const url = page.url();
   if (url.includes("/sign_in") || url.includes("/login")) return false;
+  if (url.includes("accounts.google.com")) return false;
 
   const candidates = [
     "textarea",
