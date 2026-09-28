@@ -9,7 +9,7 @@ import {
 } from "@openhub/agent";
 import { getCredentialStore } from "@/src/lib/credential-store";
 import { getChatStore } from "@/src/lib/chat-store-singleton";
-import { getSessionRegistry }-registry";
+import { getSessionRegistry } from "@/src/lib/session-registry";
 import { sendJob } from "@/src/lib/tasks";
 
 export const runtime = "nodejs";
@@ -102,8 +102,6 @@ export async function POST(req: Request): Promise<Response> {
         for (let turn = 1; turn <= max_turns; turn++) {
           send({ type: "turn_start", turn });
 
-          // Reuse the live Browserless session if we have one. First turn
-          // pays the cold-start cost; every subsequent turn is warm.
           const existing = sessionRegistry.get(userId);
 
           let assistantText = "";
