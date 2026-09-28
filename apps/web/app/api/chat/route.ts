@@ -9,7 +9,7 @@ import {
 } from "@openhub/agent";
 import { getCredentialStore } from "@/src/lib/credential-store";
 import { getChatStore } from "@/src/lib/chat-store-singleton";
-import { getSessionRegistry } from "@/src/lib/session-registry";
+import { getSessionRegistry }-registry";
 import { sendJob } from "@/src/lib/tasks";
 
 export const runtime = "nodejs";
@@ -116,17 +116,13 @@ export async function POST(req: Request): Promise<Response> {
             browserlessToken: env.BROWSERLESS_TOKEN,
             browserlessUrl: env.BROWSERLESS_URL,
             userMessage: currentPrompt,
-            existingSessionUrl: existing?.connectUrl ?? null,
+            existingSession: existing,
             extendOnUse: true,
             debug: true,
           })) {
             switch (evt.type) {
               case "session_ready":
-                sessionRegistry.set(userId, {
-                  connectUrl: evt.session_url,
-                  stopUrl: evt.stop_url,
-                  expiresAt: evt.expires_at,
-                });
+                sessionRegistry.set(userId, evt.session);
                 send({ type: "session_ready", reused: evt.reused });
                 break;
               case "message_delta":
