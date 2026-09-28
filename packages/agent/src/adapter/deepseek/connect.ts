@@ -3,6 +3,7 @@ import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import {
   createBrowserlessSession,
   stopBrowserlessSession,
+  type ProxyConfig,
 } from "./browserless";
 import { discoverSelectors } from "./discovery";
 import { encryptCredentials } from "./credentials";
@@ -18,6 +19,16 @@ export interface ConnectConfig {
   browserlessUrl: string;
   credentialKeyHex: string;
   sessionTtlMs?: number;
+  /**
+   * Route the browser's traffic through Browserless's built-in proxy.
+   * Required for DeepSeek — its CloudFront WAF blocks datacenter IPs.
+   * Fixed at session creation; cannot change mid-session.
+   */
+  proxy?: ProxyConfig;
+  /**
+   * Browser engine. "stealth" runs Brave with anti-detection patches.
+   */
+  browser?: "chrome" | "chromium" | "stealth";
   debug?: boolean;
 }
 
@@ -35,8 +46,6 @@ async function pickDeepSeekPage(browser: Browser): Promise<Page | null> {
   const pages = await browser.pages();
   const chat = pages.find((p) => p.url().startsWith(DEEPSEEK_URL));
   if (chat) return chat;
-  // If nothing is on DeepSeek yet (fresh session before navigation),
-  // fall back to the first page so the caller can navigate it.
   return pages[0] ?? null;
 }
 
@@ -46,11 +55,14 @@ export async function startConnect(
   userId: string,
 ): Promise<StartConnectResult> {
   const ttl = Math.min(cfg.sessionTtlMs ?? MAX_SESSION_MS, MAX_SESSION_MS);
+
   const session = await createBrowserlessSession({
     token: cfg.browserlessToken,
     baseUrl: cfg.browserlessUrl,
     ttlMs: ttl,
     stealth: true,
+    browser: cfg.browser,
+    proxy: cfg.proxy,
     debug: cfg.debug,
   });
 
@@ -66,6 +78,8 @@ export async function startConnect(
 
     const liveUrl = await mintLiveUrl(page, ttl, cfg.debug);
 
+    // Disconnect, don't close — the session must survive for the poll
+    // route to check login state.
     await browser.disconnect();
     browser = null;
 
@@ -166,8 +180,6 @@ export async function pollConnect(
       };
     }
 
-    // If we got a non-DeepSeek page (shouldn't happen after startConnect
-    // navigated), navigate it.
     if (!page.url().startsWith(DEEPSEEK_URL)) {
       await page.goto(DEEPSEEK_URL, { waitUntil: "domcontentloaded" });
       await new Promise((r) => setTimeout(r, 1500));
@@ -191,7 +203,7 @@ export async function pollConnect(
       try {
         liveUrl = await mintLiveUrl(page, MAX_SESSION_MS, cfg.debug);
       } catch {
-        // Old URL keeps working until it expires.
+        // old URL keeps working
       }
     }
 
@@ -206,8 +218,8 @@ export async function pollConnect(
       };
     }
 
-    // Capture cookies from the browser context (not the page — DeepSeek
-    // may set cookies on different subdomains).
+    // Capture cookies from the browser context, not the page — DeepSeek
+    // sets cookies on multiple subdomains.
     const context = browser.defaultBrowserContext();
     const cookies = await context.cookies();
     const accountHint = await scrapeAccountHint(page).catch(() => undefined);
