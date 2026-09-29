@@ -23,8 +23,6 @@ interface Message {
   role: Role;
   content: string;
   tool_name?: string;
-  tool_args?: unknown;
-  tool_result?: unknown;
   tool_error?: string;
   tool_calls?: ToolCall[];
   // client-side only
@@ -35,6 +33,16 @@ interface Message {
 let msgCounter = 0;
 const nextId = () => `m-${++msgCounter}-${Date.now()}`;
 
+/** How often we ask the server "any new tokens yet?" */
+const POLL_INTERVAL_MS = 500;
+
+/** Hard ceiling on a single turn. Generous — DeepThink can run minutes. */
+const POLL_DEADLINE_MS = 300_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export default function ChatPage() {
   const [sessionId, setSessionId] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -43,8 +51,8 @@ export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // One chat session per page mount. Persist to localStorage so reloads
-  // keep the thread.
+  // One chat session per browser. Persist to localStorage so a reload
+  // keeps the same thread on the server side too.
   useEffect(() => {
     const existing = localStorage.getItem("openhub_chat_session");
     if (existing) {
@@ -72,150 +80,113 @@ export default function ChatPage() {
     setInput("");
 
     const userMsg: Message = { id: nextId(), role: "user", content: text };
-    setMessages((prev) => [...prev, userMsg]);
-
-    // The assistant message we'll stream into.
     const assistantId = nextId();
     setMessages((prev) => [
       ...prev,
-      { id: assistantId, role: "assistant", content: "", streaming: true, toolCalls: [] },
+      userMsg,
+      { id: assistantId, role: "assistant", content: "", streaming: true },
     ]);
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          message: text,
-        }),
+        body: JSON.stringify({ session_id: sessionId, message: text }),
       });
-
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         const body = await res.text().catch(() => "");
         throw new Error(body || `request failed: ${res.status}`);
       }
+      const { chat_id } = (await res.json()) as { chat_id: string };
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-
-        for (const frame of frames) {
-          const line = frame.trim();
-          if (!line.startsWith("data: ")) continue;
-          let event: Record<string, unknown>;
-          try {
-            event = JSON.parse(line.slice(6));
-          } catch {
-            continue;
-          }
-          handleEvent(event, assistantId);
-        }
-      }
+      await pollUntilDone(chat_id, assistantId);
     } catch (e) {
       setError((e as Error).message);
-      markAssistantDone(assistantId);
+      markDone(assistantId);
     } finally {
       setBusy(false);
-      markAssistantDone(assistantId);
     }
   }
 
-  function handleEvent(event: Record<string, unknown>, assistantId: string) {
-    const type = event.type as string;
+  /**
+   * Poll the server for the accumulated reply text. Each poll is a
+   * short-lived function call — the daemon holds the browser, Vercel holds
+   * the buffer, we just read it. No long-lived connections, so this works
+   * on Vercel Hobby without hitting the 60s function timeout.
+   */
+  async function pollUntilDone(chatId: string, assistantId: string) {
+    const deadline = Date.now() + POLL_DEADLINE_MS;
 
-    if (type === "message_delta") {
-      const delta = String(event.text ?? "");
+    while (Date.now() < deadline) {
+      await sleep(POLL_INTERVAL_MS);
+
+      let res: Response;
+      try {
+        res = await fetch(`/api/chat/${chatId}`, { cache: "no-store" });
+      } catch {
+        // transient network error — keep polling
+        continue;
+      }
+
+      if (!res.ok) {
+        if (res.status === 404) {
+          setError("chat session not found on server");
+          markDone(assistantId);
+          return;
+        }
+        // 5xx: transient, keep polling
+        continue;
+      }
+
+      const data = (await res.json()) as {
+        tokens: string;
+        done: boolean;
+        error: string | null;
+      };
+
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantId ? { ...m, content: m.content + delta } : m,
+          m.id === assistantId ? { ...m, content: data.tokens } : m,
         ),
       );
-      return;
+
+      if (data.error) {
+        setError(data.error);
+        markDone(assistantId);
+        return;
+      }
+      if (data.done) {
+        markDone(assistantId);
+        return;
+      }
     }
 
-    if (type === "assistant_done") {
-      const text = String(event.text ?? "");
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId ? { ...m, content: text, streaming: false } : m,
-        ),
-      );
-      return;
-    }
-
-    if (type === "tool_call_start") {
-      const call = event.call as ToolCall;
-      setMessages((prev) =>
-        prev.map((m) => {
-          if (m.id !== assistantId) return m;
-          const existing = m.toolCalls ?? [];
-          return {
-            ...m,
-            toolCalls: [...existing, { call, status: "running" }],
-          };
-        }),
-      );
-      return;
-    }
-
-    if (type === "tool_call_done") {
-      const call = event.call as ToolCall;
-      const error = event.error as string | null;
-      const durationMs = event.durationMs as number | undefined;
-      const result = event.result;
-      setMessages((prev) =>
-        prev.map((m) => {
-          if (m.id !== assistantId) return m;
-          const list = m.toolCalls ?? [];
-          return {
-            ...m,
-            toolCalls: list.map((tc) =>
-              tc.call.raw === call.raw
-                ? {
-                    ...tc,
-                    status: error ? "error" : "done",
-                    result,
-                    error: error ?? undefined,
-                    durationMs,
-                  }
-                : tc,
-            ),
-          };
-        }),
-      );
-      return;
-    }
-
-    if (type === "error") {
-      setError(String(event.message ?? "unknown error"));
-      return;
-    }
+    setError("timed out waiting for reply");
+    markDone(assistantId);
   }
 
-  function markAssistantDone(assistantId: string) {
+  function markDone(id: string) {
     setMessages((prev) =>
-      prev.map((m) =>
-        m.id === assistantId ? { ...m, streaming: false } : m,
-      ),
+      prev.map((m) => (m.id === id ? { ...m, streaming: false } : m)),
     );
   }
 
   return (
-    <main style={{ padding: 24, maxWidth: 860, margin: "0 auto", minHeight: "100dvh", display: "flex", flexDirection: "column" }}>
+    <main
+      style={{
+        padding: 24,
+        maxWidth: 860,
+        margin: "0 auto",
+        minHeight: "calc(100dvh - 56px)",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <header style={{ marginBottom: 16 }}>
         <h1 style={{ marginBottom: 4 }}>OpenHub Chat</h1>
         <p style={{ color: "#666", marginTop: 0, fontSize: 14 }}>
-          Chat with DeepSeek. Tool calls execute on your local daemon and
-          stream back into the conversation.
+          Chat with DeepSeek. The daemon holds the browser; replies stream back
+          as they're produced.
         </p>
         <p style={{ color: "#999", marginTop: 0, fontSize: 12 }}>
           session: {sessionId || "…"}
@@ -330,7 +301,14 @@ function MessageBubble({ message }: { message: Message }) {
         }}
       >
         {isTool && (
-          <div style={{ fontSize: 11, color: "#036", marginBottom: 6, fontWeight: 600 }}>
+          <div
+            style={{
+              fontSize: 11,
+              color: "#036",
+              marginBottom: 6,
+              fontWeight: 600,
+            }}
+          >
             {message.tool_name}
             {message.tool_error ? " (error)" : ""}
           </div>
@@ -376,7 +354,11 @@ function ToolCallCard({ state }: { state: ToolCallState }) {
       }}
     >
       <div
-        style={{ display: "flex", justifyContent: "space-between", cursor: "pointer" }}
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          cursor: "pointer",
+        }}
         onClick={() => setOpen((o) => !o)}
       >
         <span style={{ fontFamily: "ui-monospace, monospace", color: "#036" }}>
@@ -390,12 +372,16 @@ function ToolCallCard({ state }: { state: ToolCallState }) {
           <pre style={pre}>{JSON.stringify(state.call.args, null, 2)}</pre>
           {state.error ? (
             <>
-              <div style={{ color: "#666", marginTop: 8, marginBottom: 4 }}>error:</div>
+              <div style={{ color: "#666", marginTop: 8, marginBottom: 4 }}>
+                error:
+              </div>
               <pre style={pre}>{state.error}</pre>
             </>
           ) : state.status === "done" ? (
             <>
-              <div style={{ color: "#666", marginTop: 8, marginBottom: 4 }}>result:</div>
+              <div style={{ color: "#666", marginTop: 8, marginBottom: 4 }}>
+                result:
+              </div>
               <pre style={pre}>{JSON.stringify(state.result, null, 2)}</pre>
             </>
           ) : null}
