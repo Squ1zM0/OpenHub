@@ -5,7 +5,7 @@ import { z } from "zod";
  * The daemon long-polls for these; when it receives one, it executes the
  * named tool against the session's workspace and posts a Result back.
  */
-export const JobKind = z.enum(["tool_call", "shutdown", "ping"]);
+export const JobKind = z.enum(["tool_call", "chat", "shutdown", "ping"]);
 export type JobKind = z.infer<typeof JobKind>;
 
 export const Job = z.object({
