@@ -1,46 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import {
-  runChatTurn,
-  decryptCredentials,
-  readDeepSeekEnv,
-  DEFAULT_USER_ID,
-  type ToolCall,
-} from "@openhub/agent";
-import { getCredentialStore } from "@/src/lib/credential-store";
-import { getChatStore } from "@/src/lib/chat-store-singleton";
-import { getSessionRegistry } from "@/src/lib/session-registry";
-import { sendJob } from "@/src/lib/tasks";
+import type { Job } from "@openhub/protocol";
+import { getStore } from "@/src/lib/store-singleton";
+import { getChatBufferStore } from "@/src/lib/chat-buffer-singleton";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 15;
 
 const Body = z.object({
   session_id: z.string().min(1),
   message: z.string().min(1).max(20_000),
-  max_turns: z.number().int().positive().max(20).default(12),
-  job_timeout_ms: z.number().int().positive().max(55_000).default(30_000),
 });
 
-interface ToolExecResult {
-  call: ToolCall;
-  result: unknown;
-  error?: string;
-  durationMs: number;
-}
-
-function formatToolResults(results: ToolExecResult[]): string {
-  return results
-    .map(({ call, result, error }) => {
-      const attrs = error
-        ? `name="${call.name}" error="true"`
-        : `name="${call.name}"`;
-      const body = error ? { error } : result;
-      return `<tool_result ${attrs}>\n${JSON.stringify(body, null, 2)}\n</tool_result>`;
-    })
-    .join("\n\n");
-}
-
+/**
+ * Accept a user message, enqueue a chat job for the daemon, and return a
+ * chat_id. The daemon picks up the job via its normal poll loop, drives
+ * the local Chromium, and streams tokens back to /api/daemon/chat-tokens.
+ *
+ * The caller polls /api/chat/[id] to read the accumulated reply.
+ *
+ * Why not SSE: on Vercel Hobby, functions are capped at 60s. A DeepSeek
+ * turn can run 60–240s. An SSE connection would hold a function open the
+ * entire time and get killed mid-reply. Polling uses short-lived calls.
+ */
 export async function POST(req: Request): Promise<Response> {
   let json: unknown;
   try {
@@ -54,178 +36,38 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: parsed.error.message }, { status: 400 });
   }
 
-  const env = readDeepSeekEnv();
-  const userId = DEFAULT_USER_ID;
-  const { session_id, message, max_turns, job_timeout_ms } = parsed.data;
+  const { session_id, message } = parsed.data;
+  const store = getStore();
 
-  const storedCreds = await getCredentialStore().get(userId);
-  if (!storedCreds) {
-    return Response.json(
-      { error: "DeepSeek is not connected. Go to /connect/deepseek first." },
-      { status: 400 },
-    );
+  // Same on-demand behavior as /api/poll: if the session isn't registered
+  // yet, register it. The daemon may be polling this id already.
+  if (!(await store.sessionExists(session_id))) {
+    await store.createSession(session_id);
   }
 
-  const creds = decryptCredentials(storedCreds, env.DEEPSEEK_CREDENTIAL_KEY);
-  const chatStore = getChatStore();
-  const sessionRegistry = getSessionRegistry();
+  const chatId = randomUUID();
+  await getChatBufferStore().create(chatId, session_id);
 
-  await chatStore.appendMessage(userId, session_id, {
-    id: randomUUID(),
-    role: "user",
-    content: message,
-    created_at: new Date().toISOString(),
-  });
+  const job: Job = {
+    job_id: randomUUID(),
+    session_id,
+    kind: "chat",
+    args: { chat_id: chatId, message },
+  };
 
-  const encoder = new TextEncoder();
+  await store.enqueueJob(session_id, job);
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      let closed = false;
-      const send = (event: unknown) => {
-        if (closed) return;
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-      };
-      const close = () => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.close();
-        } catch {
-          // already closed
-        }
-      };
-
-      try {
-        let currentPrompt = message;
-
-        for (let turn = 1; turn <= max_turns; turn++) {
-          send({ type: "turn_start", turn });
-
-          const existing = sessionRegistry.get(userId);
-
-          let assistantText = "";
-          let toolCalls: ToolCall[] = [];
-          let turnError: string | null = null;
-
-          for await (const evt of runChatTurn({
-            cookies: creds.cookies,
-            selectors: creds.selectors,
-            browserlessToken: env.BROWSERLESS_TOKEN,
-            browserlessUrl: env.BROWSERLESS_URL,
-            userMessage: currentPrompt,
-            existingSession: existing,
-            extendOnUse: true,
-            debug: true,
-          })) {
-            switch (evt.type) {
-              case "session_ready":
-                sessionRegistry.set(userId, evt.session);
-                send({ type: "session_ready", reused: evt.reused });
-                break;
-              case "message_delta":
-                send({ type: "message_delta", text: evt.text });
-                break;
-              case "message_done":
-                assistantText = evt.text;
-                toolCalls = evt.toolCalls;
-                break;
-              case "error":
-                turnError = evt.message;
-                break;
-            }
-          }
-
-          if (turnError) {
-            send({ type: "error", message: turnError });
-            close();
-            return;
-          }
-
-          await chatStore.appendMessage(userId, session_id, {
-            id: randomUUID(),
-            role: "assistant",
-            content: assistantText,
-            created_at: new Date().toISOString(),
-            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-          });
-
-          send({ type: "assistant_done", text: assistantText, toolCalls });
-
-          if (toolCalls.length === 0) {
-            send({ type: "done", turns: turn });
-            close();
-            return;
-          }
-
-          const results: ToolExecResult[] = [];
-          for (const call of toolCalls) {
-            send({ type: "tool_call_start", call });
-
-            const started = Date.now();
-            const res = await sendJob(
-              session_id,
-              call.name,
-              call.args,
-              job_timeout_ms,
-            );
-            const durationMs = Date.now() - started;
-
-            let result: unknown = null;
-            let error: string | undefined;
-            if (res.status === "ok") {
-              result = res.result.result;
-            } else {
-              error = res.error;
-            }
-
-            results.push({ call, result, error, durationMs });
-
-            await chatStore.appendMessage(userId, session_id, {
-              id: randomUUID(),
-              role: "tool",
-              content: error
-                ? `Error: ${error}`
-                : JSON.stringify(result, null, 2),
-              created_at: new Date().toISOString(),
-              tool_name: call.name,
-              tool_args: call.args,
-              tool_result: result,
-              tool_error: error,
-            });
-
-            send({
-              type: "tool_call_done",
-              call,
-              result,
-              error: error ?? null,
-              durationMs,
-            });
-          }
-
-          currentPrompt = formatToolResults(results);
-        }
-
-        send({ type: "error", message: `hit max turns (${max_turns})` });
-        close();
-      } catch (e) {
-        send({ type: "error", message: (e as Error).message });
-        close();
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    },
-  });
+  return Response.json({ chat_id: chatId });
 }
 
+/**
+ * Debug endpoint. Returns messages stored in the old chat store — left in
+ * place so the previous tool-calling flow's history is still inspectable.
+ * The new polling flow doesn't write here; it uses ChatBufferStore instead.
+ */
 export async function GET(): Promise<Response> {
+  const { getChatStore } = await import("@/src/lib/chat-store-singleton");
+  const { DEFAULT_USER_ID } = await import("@openhub/agent");
   const messages = await getChatStore().getMessages(DEFAULT_USER_ID, "default");
   return Response.json({ messages });
 }
